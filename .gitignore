@@ -1,4 +1,10 @@
 .vscode/
 
+# scraper built sqlite db holding open source nist data
+nist_handbook.sqlite
+
+# example test data
 data/
 tests/
+# generated analysis outputs (tables, charts)
+output/

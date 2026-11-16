@@ -183,8 +183,10 @@ class LoadLIBSData:
     def items(self):
         return self.data.items()
 
-    def __getitem__(self, key: str) -> LIBSFile:
-        return self.data[key]
+    def __getitem__(self, key: str | int) -> LIBSFile:
+        if isinstance(key, int):
+            return list(self.data.values())[key]  # positional access
+        return self.data[key]                    # filename access
 
     def __iter__(self):
         return iter(self.data)

@@ -18,15 +18,27 @@ class PlotLIBSData:
 
     def plot_tdms(self, wavelengths, intensities, log_y=True, n_labels=15, min_label_gap=12, title='Ce Sample',
               ref_lines=None, peak_tol=0.2, wl_range=None):
-        wl = wavlengths.astype(float).to_numpy()
-        counts = intensities.to_numpy()
-        ref_lines = [to_nm(x) for x in (ref_lines or [])]
+        wl = np.asarray(wavelengths, dtype=float)
+        counts = np.asarray(intensities, dtype=float)
+        if wl.ndim != 1 or counts.ndim != 1 or len(wl) != len(counts):
+            raise ValueError('wavelengths and intensities must be one-dimensional and have equal length')
+        if len(wl) == 0:
+            raise ValueError('wavelengths and intensities cannot be empty')
+
+        # A mapping gives reference labels; a sequence uses the wavelength as its label.
+        if hasattr(ref_lines, 'items'):
+            references = [(str(label), self._to_nm(value)) for label, value in ref_lines.items()]
+        else:
+            references = [
+                (f'{self._to_nm(value):.2f} nm', self._to_nm(value))
+                for value in (ref_lines or [])
+            ]
 
         # zoom window: whole spectrum, or each end snapped to the nearest measured wavelength
         if wl_range is None:
             lo, hi = wl.min(), wl.max()
         else:
-            lo, hi = sorted(wl[np.argmin(np.abs(wl - to_nm(x)))] for x in wl_range)
+            lo, hi = sorted(wl[np.argmin(np.abs(wl - self._to_nm(x)))] for x in wl_range)
         in_view = (wl >= lo) & (wl <= hi)
         span = hi - lo
 
@@ -51,13 +63,21 @@ class PlotLIBSData:
                         ha='center', va='bottom', rotation=90, fontsize=8, color='#444444',
                         bbox=dict(facecolor='white', edgecolor='none', pad=0.5))
 
-        visible_refs = [x for x in ref_lines if lo <= x <= hi]
-        for i, x in enumerate(visible_refs):
-            ax.axvline(x, color='#d62728', linewidth=0.8, linestyle='--', label='Cerium Reference lines' if i == 0 else None)
+        view_counts = counts[in_view]
+        visible_refs = [(label, x) for label, x in references if lo <= x <= hi]
+        for i, (label, x) in enumerate(visible_refs):
+            nearest_index = np.argmin(np.abs(wl - x))
+            actual_x = wl[nearest_index]
+            ax.axvline(actual_x, color='#d62728', linewidth=0.8, linestyle='--',
+                       label='Reference lines' if i == 0 else None)
+            ax.annotate(label, xy=(actual_x, counts[nearest_index]),
+                        xytext=(actual_x, view_counts.max() * 0.88),
+                        ha='center', va='top', rotation=90, fontsize=8,
+                        color='#d62728',
+                        arrowprops=dict(arrowstyle='->', color='#d62728', lw=0.8))
         if visible_refs:
             ax.legend(loc='upper right', frameon=False)
 
-        view_counts = counts[in_view]
         if log_y:
             ax.set_yscale('log')
             ax.set_ylim(view_counts.min() * 0.8, view_counts.max() * 3)
@@ -83,7 +103,7 @@ class PlotLIBSData:
         peak_wl = wl[peaks]
         with warnings.catch_warnings():
             warnings.simplefilter('always')
-            for x in ref_lines:
+            for _, x in references:
                 nearest = peak_wl[np.argmin(np.abs(peak_wl - x))]
                 if abs(nearest - x) > peak_tol:
                     warnings.warn(f'no peak within {peak_tol} nm of {x} nm (nearest peak: {nearest:.2f} nm)', stacklevel=2)
