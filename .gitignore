@@ -1,10 +1,17 @@
 .vscode/
+__pycache__/
+.pytest_cache/
 
-# scraper built sqlite db holding open source nist data
+# packaging
+*.egg-info/
+build/
+dist/
+
+# legacy repo-root NIST database / page cache (now kept in the per-user data folder)
 nist_handbook.sqlite
+nist_cache/
 
-# example test data
+# example data (tests use small synthetic files and tests/fixtures)
 data/
-tests/
 # generated analysis outputs (tables, charts)
 output/

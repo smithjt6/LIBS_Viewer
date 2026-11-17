@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "libs_viewer"
+dynamic = ["version"]
+description = "Load, process and compare Applied Spectra LIBS (.tdms) spectra, with a local NIST line database."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "John Smith" }]
+dependencies = [
+    "numpy>=2.0",          # np.trapezoid
+    "pandas>=2.0",
+    "scipy>=1.11",
+    "matplotlib>=3.7",
+    "npTDMS>=1.7",
+    "pybaselines>=1.1",
+    "platformdirs>=3.0",
+    "requests>=2.28",      # NIST database builder
+]
+
+[project.optional-dependencies]
+ui = ["streamlit>=1.30"]
+mcp = ["mcp>=1.0"]
+dev = ["pytest>=7"]
+all = ["libs_viewer[ui,mcp,dev]"]
+
+[project.scripts]
+libs-viewer = "libs_viewer.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "libs_viewer.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:libs_viewer.*"]
