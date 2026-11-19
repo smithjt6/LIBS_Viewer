@@ -52,6 +52,7 @@ class Sample:
     mask: np.ndarray                      # saturated pixels at any temperature
     lines: dict[str, float] = field(default_factory=dict)   # {label: nm}
     areas: pd.DataFrame | None = None
+    windows: dict[str, tuple[int, int]] | None = None   # {label: (lo, hi)}
 
 
 @dataclass
@@ -173,6 +174,7 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
     '''
     if baseline not in BASELINE_METHODS:
         raise ValueError(f'baseline must be one of {BASELINE_METHODS}, got {baseline!r}')
+    
     folder = Path(folder)
     db = resolve_db(db_path)                       # fail early if the NIST database is missing
     plan = _restrict(study_plan(folder, pattern=pattern, manifest=manifest, temperatures=temperatures),
@@ -198,6 +200,7 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
                 'elements': elements, 'baseline': baseline, 'ref': ref, 'n_lines': n_lines,
                 'min_prominence': min_prominence, 'interferents': interferents, 'total_row': total_row,
                 'key_settings': list(KEY_SETTINGS), 'nist_db': str(db)}
+    
     return StudyResult(settings=settings, plan=plan, overview=overview_table(files),
                        line_tables=line_tables, areas=areas, r_direct=r_direct, r_rel=r_rel,
                        scatter=scatter_df, notes=notes, wl=wl, sample_data=samples)
@@ -238,6 +241,7 @@ def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dic
         ({file: LIBSFile with only the spectra used}, use_columns per plan row, None = all).
     '''
     raw = {}
+
     for k in plan.file:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -249,6 +253,7 @@ def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dic
                 warnings.warn(w.message, w.category, stacklevel=2)
 
     files = {}
+
     for sample, g in plan.groupby('sample', sort=False):
         votes = Counter(s for k in g.file for s in set(_settings(raw[k])))
         (usual, n), *others = votes.most_common()
@@ -272,8 +277,10 @@ def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dic
                 dropped = f.subset(columns=f.spectra.columns[~keep])
                 notes.append(f'{key}: used {files[key].describe()}; dropped {dropped.describe()} '
                              f'acquired with {_fmt(_settings(dropped)[0])} instead of {_fmt(usual)}')
+                
     use = [None if files[k].spectra.shape[1] == raw[k].spectra.shape[1] else list(files[k].spectra.columns)
            for k in plan.file]
+    
     return {k: files[k] for k in plan.file}, use
 
 
@@ -319,20 +326,26 @@ def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, in
 def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row, notes: list[str]):
     '''analyze_sample + ratio_tables per sample; ratio warnings go into `notes`.'''
     areas, r_direct, r_rel = {}, {}, {}
+
     for s in samples.values():
         s.areas = analyze_sample(wl, s.spectra, s.lines, method=baseline, exclude=s.mask, ref=ref)
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always', RatioWarning)
             r = ratio_tables(s.areas, ref=ref, total_row=total_row)
+
         for w in caught:
             if issubclass(w.category, RatioWarning):
                 notes.append(f'{s.name}: {w.message}')
             else:
                 warnings.warn(w.message, w.category, stacklevel=2)
+
         areas[s.name], r_direct[s.name], r_rel[s.name] = s.areas, r['R_direct'], r['R_rel']
+        s.windows = line_windows(wl, s.spectra[ref], s.lines)
 
     def stack(d):
         return pd.concat(d, names=['sample', 'row'])
+    
     return stack(areas), stack(r_direct), stack(r_rel)
 
 
@@ -353,31 +366,32 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref) -> pd.DataFrame:
     rows = {}
 
     for s in samples.values():
-
         lines = list(s.lines)
-        
+        windows = s.windows if s.windows is not None else line_windows(wl, s.spectra[ref], s.lines)
+
         for t, f in s.files.items():
-            windows = line_windows(wl, s.spectra[ref], s.lines)
             row = {}
+
             locs = location_spectra(f)
             if locs.shape[1] > 1:
                 cv = _cv(areas_table(wl, locs, s.lines, windows, method=baseline, exclude=s.mask))
                 row['location CV, lines (%)'] = cv[lines].mean() if lines else np.nan
                 row['location CV, Total (%)'] = cv[TOTAL]
+
             single = f.acquisitions[f.acquisitions['shots_summed'] == 1]
             per_loc = single.groupby('location').size()
             if (per_loc > 1).any():
                 shots = per_shot_columns(f)[single.index]
                 a = areas_table(wl, shots, s.lines, windows, method=baseline, exclude=s.mask)
-                cv = pd.DataFrame({loc: _cv(a[single.index[single['location'] == loc]])
-                                   for loc in per_loc.index[per_loc > 1]}).mean(axis=1)
+                g = a.T.groupby(single['location'])
+                cv = (100 * g.std() / g.mean())[per_loc > 1].mean()
                 row['shot CV, lines (%)'] = cv[lines].mean() if lines else np.nan
                 row['shot CV, Total (%)'] = cv[TOTAL]
+
             if row:
                 rows[(s.name, t)] = {'locations': f.n_locations, 'spectra': f.spectra.shape[1], **row}
+
     cols = ['locations', 'spectra', 'location CV, lines (%)', 'location CV, Total (%)',
             'shot CV, lines (%)', 'shot CV, Total (%)']
-    df = pd.DataFrame.from_dict(rows, orient='index').reindex(columns=cols)
-    if len(df):
-        df.index.names = ['sample', 'temperature']
-    return df
+    
+    return pd.DataFrame.from_dict(rows, orient='index').reindex(columns=cols)

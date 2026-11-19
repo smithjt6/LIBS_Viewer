@@ -163,7 +163,13 @@ def saturated_share(areas: pd.DataFrame) -> pd.Series:
     Clipped pixels cannot get brighter, so when this share is large the 'Total' row
     understates how the light changed, and R_rel divided by it is pulled toward 1.
     '''
-    return 1 - areas.loc[TOTAL_EXCL] / areas.loc[TOTAL]
+    excluded = areas.loc[TOTAL_EXCL]
+    total = areas.loc[TOTAL]
+
+    if not isinstance(excluded, pd.Series) or not isinstance(total, pd.Series):
+        raise ValueError("areas must have exactly one row for each total")
+
+    return 1 - excluded / total
 
 
 def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL,
