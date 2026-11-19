@@ -34,8 +34,10 @@ so results don't depend on who (or what) pushed the buttons.
 
 ### Scope
 
-- **In scope:** Applied Spectra LIBS `.tdms` files (one file = one acquisition, one column per
-  grid location, 31-row parameter block). Spectra comparison across conditions (temperature,
+- **In scope:** Applied Spectra LIBS `.tdms` files (one file = one acquisition, 31-row
+  parameter block, one stored spectrum per channel `Grid Location # L-S`: either the sum of
+  N shots at location L with Accumulate = 1, or single shot S at location L with Accumulate = 0;
+  files mixing both are handled). Spectra comparison across conditions (temperature,
   delay, energy, sample).
 - **Not in scope:** other LIBS vendors' formats. The loader is deliberately format-specific
   and validates the layout instead of guessing. It is possible to adjust the data loading
@@ -74,7 +76,7 @@ neither is given (or both are), they raise an error instead of falling back to g
 
 | Mode | Input | Use when |
 |---|---|---|
-| **Manifest** (`manifest=`) | CSV or DataFrame, one row per file: `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (grid-location names separated by `;`, empty = all) | Names are inconsistent, or you want the grouping written down next to the data |
+| **Manifest** (`manifest=`) | CSV or DataFrame, one row per file: `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (stored-spectrum names such as `Grid Location # 1-1`, separated by `;`, empty = choose automatically). Example: [examples/end_to_end_manifest.csv](examples/end_to_end_manifest.csv) | Names are inconsistent, or you want the grouping written down next to the data |
 | **Pattern** (`pattern=`) | Template matched against every `.tdms` path under the folder: `{element}` and `{temperature}` required, `{sample}` optional, `*` = any text within one folder or file name, e.g. `{element}/{sample}/*{temperature}*`. Pass `temperatures=[300, 350, 400]` when a temperature is glued to other digits (`Ce1400.tdms`) | Names follow a fixed convention |
 
 Rules for both modes:
@@ -84,10 +86,12 @@ Rules for both modes:
 - Two files for the same sample and temperature, a file name containing two candidate
   temperatures, or a sample with more than one element is an error.
 - Every sample needs a file at the reference temperature (default 300 °C) or the study fails.
-- The resolved plan (file → element, sample, temperature, grid locations used) is saved with
+- The resolved plan (file → element, sample, temperature, stored spectra used) is saved with
   the results (`plan.csv`, `settings.json`).
-- Grid locations acquired with a different gate delay or laser energy than the rest of their
+- Stored spectra acquired with a different gate delay or laser energy than the rest of their
   sample are dropped automatically (unless `use_columns` is given) and listed in `notes`.
+  Samples whose temperatures were acquired differently (accumulated vs single shots, number of
+  locations) are also listed: their per-shot averages compare, their scatter values don't.
 
 Low-level loading of single files (`LIBSFile.from_tdms`) stays available for inspection and
 doesn't need a manifest.
@@ -137,18 +141,18 @@ Everything below except plotting is importable from `libs_viewer.libs`
 | Area | Function / class | Module | Notes |
 |---|---|---|---|
 | Load a file or folder | `LoadLIBSData(path, recursive=False)`, `.overview()` | [loading.py](src/libs_viewer/libs/loading.py) | Dict-like `{relative path: LIBSFile}`; `overview()` = one row of key settings per file; unreadable files are skipped with a warning (will become strict, see [Loading contract](#loading-contract)) |
-| One acquisition | `LIBSFile` (`params`, `positions`, `spectra`, `column_params`, `wavelengths`, `accumulated`, `param_table()`, `varying_params()`) | [loading.py](src/libs_viewer/libs/loading.py) | Validates the Applied Spectra layout; warns if parameters differ between grid locations, and `varying_params()` shows them per location so odd columns can be dropped |
-| File names | `temperature_from_name` | [loading.py](src/libs_viewer/libs/loading.py) | `..._300C.tdms`, `..._300_3.5delay.tdms` |
-| Which file is which | `study_plan(folder, pattern=... \| manifest=..., temperatures=None)` | [loading.py](src/libs_viewer/libs/loading.py) | Pattern placeholders `{element}` `{sample}` `{temperature}` `*`; manifest CSV `file, element, sample, temperature[, use_columns]`; raises if neither, on unmatched files, duplicates or ambiguous temperatures |
-| Whole study in one call | `run_study(folder, elements, baseline, pattern \| manifest, ...)` → `StudyResult`; CLI `libs-viewer analyze` | [study.py](src/libs_viewer/libs/study.py) | Plan → drop grid locations with other gate/energy → per-shot spectra + saturation → NIST lines → areas, R_direct, R_rel, location scatter. `notes` lists every automatic decision; `save()` writes CSVs + `settings.json` (provenance) + `summary.txt` |
+| One file | `LIBSFile` (`spectra`, `acquisitions`, `params`, `positions`, `wavelengths`, `n_locations`, `storage`, `shots_per_location()`, `describe()`, `subset(columns=, locations=)`, `accumulate()`, `param_table()`, `varying_params()`) | [loading.py](src/libs_viewer/libs/loading.py) | `acquisitions` = one row per stored spectrum: `location`, `shot`, `shots_summed`, X/Y/Z and every instrument parameter. Locations come from the channel names (checked against the stage position, else grouped by position). `accumulate()` sums each location's spectra into one (as if Accumulate = 1). `SettingsWarning` when settings differ between stored spectra; `LayoutWarning` when one location's spectra sit at different positions, two locations share a position, a location holds repeated accumulated spectra, or `accumulate()` has nothing to do (`run_study` puts layout warnings in `notes`) |
+| File names | `temperature_from_name` | [plan.py](src/libs_viewer/libs/plan.py) | `..._300C.tdms`, `..._300_3.5delay.tdms` |
+| Which file is which | `study_plan(folder, pattern=... \| manifest=..., temperatures=None)` | [plan.py](src/libs_viewer/libs/plan.py) | Pattern placeholders `{element}` `{sample}` `{temperature}` `*`; manifest CSV `file, element, sample, temperature[, use_columns]`; raises if neither, on unmatched files, duplicates or ambiguous temperatures |
+| Whole study in one call | `run_study(folder, elements, baseline, pattern \| manifest, ...)` → `StudyResult`; CLI `libs-viewer analyze` | [study.py](src/libs_viewer/libs/study.py) | Plan → drop stored spectra with other gate/energy → per-shot spectra + saturation → NIST lines → areas, R_direct, R_rel, location and shot scatter. `notes` lists every automatic decision; `save()` writes CSVs + `settings.json` (provenance) + `summary.txt` |
 | Baseline check / study figure | `plot_baseline`, `plot_study` | [plotting.py](src/libs_viewer/libs/plotting.py) | Spectrum with fitted continuum + corrected spectrum; R_rel / R_total vs temperature per sample |
-| Shot scaling | `per_shot_spectrum`, `shots_per_column` | [processing.py](src/libs_viewer/libs/processing.py) | Divides accumulated columns by `Number Of Shots`, averages columns |
+| Shot scaling | `per_shot_spectrum`, `per_shot_columns`, `location_spectra` | [processing.py](src/libs_viewer/libs/processing.py) | All counts ÷ all shots (every shot weighs the same, accumulated or not); per stored spectrum; per location |
 | Continuum removal | `global_baseline` (`'snip'`, `'airpls'`) | [processing.py](src/libs_viewer/libs/processing.py) | via `pybaselines` |
-| Saturation | `saturated_mask`, `exclusion_mask` | [processing.py](src/libs_viewer/libs/processing.py) | Flags clipped pixels across all files of a sample |
+| Saturation | `saturated_mask`, `exclusion_mask` | [processing.py](src/libs_viewer/libs/processing.py) | Flags clipped pixels across all files of a sample (single shots at full scale; accumulated spectra from ~80% of it, to catch shots that clipped only some of the time) |
 | Total area | `total_area` | [metrics.py](src/libs_viewer/libs/metrics.py) | Optional exclusion of saturated pixels / nm ranges |
-| Line area | `peak_bounds`, `integrate_local_peak` | [metrics.py](src/libs_viewer/libs/metrics.py) | Valley-to-valley window, straight local baseline |
+| Line area | `peak_bounds`, `line_window`, `integrate_local_peak` | [metrics.py](src/libs_viewer/libs/metrics.py) | Valley-to-valley (or fixed) window, straight local baseline through the mean of 2 edge pixels each side |
 | Line choice | `select_lines` | [lines.py](src/libs_viewer/libs/lines.py) | NIST candidates filtered by detection, blending, saturation, interferents |
-| Sample tables | `analyze_sample`, `per_column_areas`, `ratio_tables` | [analysis.py](src/libs_viewer/libs/analysis.py) | Same pixel windows at every temperature; `R_direct` and `R_rel` tables |
+| Sample tables | `analyze_sample`, `areas_table`, `ratio_tables` | [analysis.py](src/libs_viewer/libs/analysis.py) | Same pixel windows at every temperature; `areas_table` measures any set of spectra (e.g. per location); `R_direct` and `R_rel` tables. R_rel, R_total and the Total scatter use `Total (excl. sat.)` (clipped pixels left out); the plain `Total` is kept for reference. `RatioWarning` when a line window holds saturated pixels, when `Total` is chosen but largely saturated (`saturated_share`), or when a reference area is ≤ 0 (ratios NaN) |
 | Spectrum plot | `plot_spectrum` | [plotting.py](src/libs_viewer/libs/plotting.py) | Log-y, zoom, peak labels, reference lines; returns a matplotlib `Figure` |
 | Line lookups | `strong_lines`, `database_info` | [query.py](src/libs_viewer/nist/query.py) | Read-only; wavelengths returned in nm |
 | Line database | `libs-viewer nist build` | [build.py](src/libs_viewer/nist/build.py) | User only. See [NIST line database](#nist-line-database) |
@@ -164,7 +168,7 @@ temperature (300 → 350 → 400 °C), both overall and line by line?
 
 | # | Step | Code | Status |
 |---|---|---|---|
-| 1 | Put every spectrum on a per-shot scale (10 accumulated shots ÷ 10) | `per_shot_spectrum` | ✅ |
+| 1 | Put every spectrum on a per-shot scale (accumulated or single shots) | `per_shot_spectrum` | ✅ |
 | 2 | Estimate and subtract the plasma continuum (no background spectra exist per temperature) | `global_baseline` (SNIP / airPLS) | ✅ |
 | 3 | Total integrated area per temperature, ratio to 300 °C: overall intensity change | `total_area` → `ratio_tables(...)['R_direct'].loc['Total']` | ✅ |
 | 4 | Pick 3-4 strong, clean lines per element (e.g. Ce II 394.20 nm) | `select_lines` | ✅ |
@@ -227,8 +231,9 @@ src/libs_viewer/
     build.py            database builder (formerly scraper.py), tier 3
     query.py            read-only line lookups, database status
   libs/
-    loading.py          LIBSFile, LoadLIBSData, study_plan (manifest / pattern), file-name parsing
-    processing.py       per-shot scaling, saturation mask, baseline correction
+    loading.py          LIBSFile (spectra + one row per stored spectrum), LoadLIBSData, overview
+    plan.py             study_plan (manifest / pattern), file-name parsing
+    processing.py       per-shot scaling, location spectra, saturation mask, baseline correction
     metrics.py          total area, peak bounds, local-baseline line area
     lines.py            line selection and interferent checks (uses nist.query)
     analysis.py         analyze_sample, ratio tables
@@ -240,7 +245,8 @@ src/libs_viewer/
   mcp/                  (planned) MCP server over core/tools.py (tiers 0-2 only)
   cli.py                `libs-viewer paths | nist build | nist status`
 tests/                  pytest; synthetic .tdms files, real NIST pages in tests/fixtures/nist
-examples/               notebooks: quick_study, loading_data, end_to_end_temp_study (data/ is not in git)
+examples/               notebooks: quick_study, loading_data, end_to_end_temp_study (data/ is not in git);
+                        end_to_end_manifest.csv, an example manifest for data/end_to_end
 ```
 
 ---

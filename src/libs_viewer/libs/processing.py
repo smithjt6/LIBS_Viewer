@@ -1,11 +1,15 @@
 '''
-Spectrum-level processing: shot scaling, saturation, continuum (baseline) removal.
+Spectrum-level processing: per-shot scaling, saturation, continuum (baseline) removal.
+
+Per-shot scaling uses `LIBSFile.acquisitions['shots_summed']` of every stored spectrum, so
+accumulated spectra, single shots and files mixing both all end up in counts per shot. To use
+only some spectra or locations, pass `f.subset(...)`.
 
 All functions take arrays / LIBSFile objects and return arrays; no plotting, no file I/O.
 '''
 
-from typing import Sequence
 import numpy as np
+import pandas as pd
 from pybaselines import Baseline
 
 from .loading import LIBSFile
@@ -13,33 +17,30 @@ from .loading import LIBSFile
 BASELINE_METHODS = ('snip', 'airpls')
 
 
-def shots_per_column(f: LIBSFile) -> float:
+def per_shot_columns(f: LIBSFile) -> pd.DataFrame:
+    '''Every stored spectrum in counts per shot (each column divided by its shots summed).'''
+    return f.spectra.div(f.acquisitions['shots_summed'], axis=1)
+
+
+def per_shot_spectrum(f: LIBSFile) -> np.ndarray:
     '''
-    Number of laser shots summed into each spectrum column.
-
-    Accumulated files (Accumulate = 1) store the sum of `Number Of Shots` shots per column;
-    otherwise each column is one shot.
-    '''
-    return float(f.params['Number Of Shots']) if f.accumulated else 1.0
-
-
-def per_shot_spectrum(f: LIBSFile, columns: list[str] | None = None) -> np.ndarray:
-    '''
-    Mean single-shot spectrum of one file.
-
-    Each column is divided by `shots_per_column(f)` and the selected columns are averaged.
-
-    Args:
-        f: a loaded LIBSFile.
-        columns: column names to use (default: all). Use this to drop columns that were
-            acquired with different settings than the first column, since `f.params`
-            only describes the first column.
+    Mean single-shot spectrum of one file: all counts divided by all shots, so every shot
+    weighs the same whether it was stored on its own or accumulated.
 
     Returns:
         1-D array of intensities (counts per shot), aligned with `f.wavelengths`.
     '''
-    spectra = f.spectra if columns is None else f.spectra[columns]
-    return (spectra / shots_per_column(f)).mean(axis=1).to_numpy(dtype=float)
+    total = f.spectra.sum(axis=1) / f.acquisitions['shots_summed'].sum()
+    return total.to_numpy(dtype=float)
+
+
+def location_spectra(f: LIBSFile) -> pd.DataFrame:
+    '''Mean single-shot spectrum of every location (columns = location numbers).'''
+    loc = f.acquisitions['location']
+    summed = f.spectra.T.groupby(loc).sum().T
+    out = summed / f.acquisitions.groupby('location')['shots_summed'].sum()
+    out.columns.name = 'location'
+    return out
 
 
 def global_baseline(wl: np.ndarray, y: np.ndarray, method: str = 'snip',
@@ -70,40 +71,57 @@ def global_baseline(wl: np.ndarray, y: np.ndarray, method: str = 'snip',
 
 def exclusion_mask(wl: np.ndarray, exclude) -> np.ndarray:
     '''
-    Boolean pixel mask from `exclude`, which may be None (nothing excluded), a boolean array
-    aligned with `wl` (e.g. from `saturated_mask`), or a list of (lo, hi) nm ranges.
+    Boolean pixel mask from `exclude`, which may be None (nothing excluded), a boolean
+    array/sequence aligned with `wl` (e.g. from `saturated_mask`), or an iterable of
+    (lo, hi) nm ranges.
     '''
     if exclude is None:
         return np.zeros(len(wl), dtype=bool)
-    if isinstance(exclude, np.ndarray) and exclude.dtype == bool:
-        return exclude
+
+    arr = np.asarray(exclude)
+    if arr.dtype == bool:
+        if arr.shape != wl.shape:
+            raise ValueError(f"Boolean exclude mask shape {arr.shape} does not match wl shape {wl.shape}")
+        return arr.copy()
+
     mask = np.zeros(len(wl), dtype=bool)
-    for lo, hi in exclude:
+    
+    for item in exclude:
+        try:
+            lo, hi = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Expected a boolean mask or (lo, hi) wavelength pairs, got element {item!r}"
+            ) from exc
         mask |= (wl >= lo) & (wl <= hi)
+
     return mask
 
 
-def saturated_mask(files: list[LIBSFile], columns: Sequence[Sequence[str] | None] | None = None,
-                   level: float = 64900.0, pad_px: int = 2) -> np.ndarray:
+def saturated_mask(files: list[LIBSFile], level: float = 64900.0,
+                   accumulated_level: float = 52000.0, pad_px: int = 2) -> np.ndarray:
     '''
-    Pixels where the detector clipped in any of the given files.
+    Pixels where the detector clipped in any stored spectrum of any of the given files.
 
-    A pixel is flagged if its per-shot intensity reaches `level` counts in any used column
-    of any file (the 16-bit detector tops out at ~65000-65500 counts per shot), and the flag
-    is widened by `pad_px` pixels each side. Pass all temperatures of one sample together so
-    the same pixels are excluded at every temperature.
+    Single shots: flagged where the intensity reaches `level` counts (the detector clips
+    at 64,980-65,500 counts per shot, depending on the spectrometer channel).
 
-    Limitation: an accumulated column is the sum of its shots, so clipping is only seen
-    when (nearly) every shot clipped; a line that clipped in 1 of 5 shots goes unnoticed.
+    Accumulated spectra: the stored sum of N shots only reaches N x `level` where every shot
+    clipped; where only some did, the per-shot mean sits below `level`. So these are flagged
+    from the lower `accumulated_level` (about 80% of full scale) up: with the 15-50%
+    shot-to-shot scatter seen in LIBS, a pixel that bright on average clipped on some shots.
+
+    Each flag is widened by `pad_px` pixels on each side. Pass all temperatures of one sample
+    together so the same pixels are excluded at every temperature.
 
     Returns:
         Boolean array aligned with the wavelength axis.
     '''
-    columns = columns or [None] * len(files)
     mask = np.zeros(len(files[0].wavelengths), dtype=bool)
-    for f, cols in zip(files, columns):
-        spectra = f.spectra if cols is None else f.spectra[cols]
-        mask |= (spectra.max(axis=1).to_numpy(dtype=float) / shots_per_column(f)) >= level
+    for f in files:
+        accumulated = f.acquisitions['shots_summed'].to_numpy() > 1
+        limit = np.where(accumulated, accumulated_level, level)        # one limit per spectrum
+        mask |= (per_shot_columns(f).to_numpy(dtype=float) >= limit).any(axis=1)
     if pad_px:
         mask = np.convolve(mask, np.ones(2 * pad_px + 1), mode='same') > 0
     return mask

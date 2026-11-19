@@ -1,11 +1,12 @@
 '''
 LIBS (Applied Spectra .tdms) loading, processing and analysis.
 
-    loading     LIBSFile, LoadLIBSData, study_plan (pattern / manifest), file-name parsing
-    processing  per-shot scaling, saturation mask, continuum (baseline) removal
+    loading     LIBSFile (one file: spectra + one row per stored spectrum), LoadLIBSData
+    plan        study_plan: which file is which (manifest / pattern)
+    processing  per-shot scaling, location spectra, saturation mask, continuum (baseline) removal
     metrics     total area, line windows, local-baseline line area
     lines       NIST-based line selection
-    analysis    per-sample area tables and ratio tables
+    analysis    area tables and ratio tables
     study       run_study: a whole temperature study in one call
     plotting    figures (import it directly: `from libs_viewer.libs.plotting import plot_spectrum`)
 
@@ -13,19 +14,24 @@ The common names are re-exported here. Plotting is not, so the analysis code can
 without matplotlib.
 '''
 
-from .loading import LIBSFile, LoadLIBSData, study_plan, temperature_from_name
-from .processing import (exclusion_mask, global_baseline, per_shot_spectrum, saturated_mask,
-                         shots_per_column)
-from .metrics import integrate_local_peak, peak_bounds, total_area
+from .loading import LayoutWarning, LIBSFile, LoadLIBSData, SettingsWarning, overview_table
+from .plan import study_plan, temperature_from_name
+from .processing import (exclusion_mask, global_baseline, location_spectra, per_shot_columns,
+                         per_shot_spectrum, saturated_mask)
+from .metrics import integrate_local_peak, line_window, peak_bounds, total_area
 from .lines import select_lines
-from .analysis import TOTAL, TOTAL_EXCL, analyze_sample, line_windows, per_column_areas, ratio_tables
-from .study import StudyResult, run_study
+from .analysis import (TOTAL, TOTAL_EXCL, RatioWarning, analyze_sample, areas_table, line_windows,
+                       ratio_tables, saturated_share)
+from .study import Sample, StudyResult, run_study
 
 __all__ = [
-    'LIBSFile', 'LoadLIBSData', 'study_plan', 'temperature_from_name',
-    'exclusion_mask', 'global_baseline', 'per_shot_spectrum', 'saturated_mask', 'shots_per_column',
-    'integrate_local_peak', 'peak_bounds', 'total_area',
+    'LIBSFile', 'LoadLIBSData', 'overview_table', 'LayoutWarning', 'SettingsWarning',
+    'study_plan', 'temperature_from_name',
+    'exclusion_mask', 'global_baseline', 'location_spectra', 'per_shot_columns', 'per_shot_spectrum',
+    'saturated_mask',
+    'integrate_local_peak', 'line_window', 'peak_bounds', 'total_area',
     'select_lines',
-    'TOTAL', 'TOTAL_EXCL', 'analyze_sample', 'line_windows', 'per_column_areas', 'ratio_tables',
-    'StudyResult', 'run_study',
+    'TOTAL', 'TOTAL_EXCL', 'RatioWarning', 'analyze_sample', 'areas_table', 'line_windows',
+    'ratio_tables', 'saturated_share',
+    'Sample', 'StudyResult', 'run_study',
 ]

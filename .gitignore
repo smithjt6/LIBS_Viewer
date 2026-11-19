@@ -15,3 +15,6 @@ nist_cache/
 data/
 # generated analysis outputs (tables, charts)
 output/
+
+#copiloting folders
+.continue/

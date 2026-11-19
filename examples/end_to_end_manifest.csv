@@ -1,0 +1,13 @@
+file,element,sample,temperature,use_columns
+Ce/1_wt%/Ce1_300C.tdms,Ce,Ce 1 wt%,300,
+Ce/1_wt%/Ce1 350 new location.tdms,Ce,Ce 1 wt%,350,
+Ce/1_wt%/Ce1400.tdms,Ce,Ce 1 wt%,400,
+Ce/5_wt%/Ce_Sample2_Temp_300C.tdms,Ce,Ce 5 wt%,300,
+Ce/5_wt%/Ce_Sample2_Temp_350C.tdms,Ce,Ce 5 wt%,350,
+Ce/5_wt%/Ce_Sample2_Temp_400C.tdms,Ce,Ce 5 wt%,400,
+Gd/1_wt%/Gd_Sample1_300.tdms,Gd,Gd 1 wt%,300,
+Gd/1_wt%/Gd_Sample1_350.tdms,Gd,Gd 1 wt%,350,
+Gd/1_wt%/Gd_Sample1_400.tdms,Gd,Gd 1 wt%,400,
+Gd/5_wt%/Gd_Sample5_300_3.5delay.tdms,Gd,Gd 5 wt%,300,Grid Location # 1-1
+Gd/5_wt%/Gd_Sample5_350_3.5delay.tdms,Gd,Gd 5 wt%,350,
+Gd/5_wt%/Gd_Sample5_400_3.5delay.tdms,Gd,Gd 5 wt%,400,

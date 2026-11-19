@@ -2,8 +2,8 @@
 Shared fixtures: synthetic spectra and synthetic Applied Spectra .tdms files.
 
 The .tdms layout mirrors the real files: one header channel whose first 31 rows are
-parameter names (with a leading ') followed by the wavelength axis, and one channel per grid
-location whose first 31 rows are that location's parameter values, followed by intensities.
+parameter names (with a leading ') followed by the wavelength axis, and one channel per stored
+spectrum whose first 31 rows are that spectrum's parameter values, followed by intensities.
 '''
 
 import shutil
@@ -47,22 +47,35 @@ def synth_spectrum(areas: dict[str, float], wl=WL) -> np.ndarray:
 
 
 def write_tdms(path, per_shot: np.ndarray, n_cols: int = 3, shots: int = 10, accumulate: int = 1,
-               energy: float = 80.0, energies: list[float] | None = None, wl=WL):
+               energy: float = 80.0, energies: list[float] | None = None, wl=WL,
+               locations: list[int] | None = None, accumulates: list[int] | None = None,
+               x_positions: list[float] | None = None):
     '''
     Writes one synthetic Applied Spectra file. Columns hold `per_shot * shots` (accumulated)
     or `per_shot` (not accumulated), each scaled by a slightly different factor so the columns differ.
-    `energies` gives a per-column Energy value (to test the "parameters differ" warning).
+    `energies` / `accumulates` give per-column Energy / Accumulate values (mixed files).
+
+    By default every column is its own location, named 'Location c'. With `locations` (the
+    location number of every column) the columns are named like the instrument does,
+    'Grid Location # L-S', and columns of one location share a stage position.
+    `x_positions` overrides the X stage position of every column (to break that on purpose).
     '''
     header = np.array(["'" + n for n in PARAM_NAMES] + [repr(float(w)) for w in wl])
     channels = [ChannelObject('Group', 'Wavelength', header)]
+    shot_no: dict[int, int] = {}
     for c in range(n_cols):
         e = energies[c] if energies else energy
+        acc = accumulates[c] if accumulates else accumulate
+        loc = locations[c] if locations else c
+        shot_no[loc] = shot_no.get(loc, 0) + 1
+        name = f'Grid Location # {loc}-{shot_no[loc]}' if locations else f'Location {c + 1}'
         # positional, in PARAM_NAMES order (the two 'Gas Type' rows get 1 and 2)
-        values = ([accumulate, shots, e, 1, 2, 10.0 * c, 5.0, 0.0, 3.5]
+        x = x_positions[c] if x_positions else 10.0 * loc
+        values = ([acc, shots, e, 1, 2, x, 5.0, 0.0, 3.5]
                   + [float(i) for i in range(10, loading.N_PARAMS + 1)])
-        scale = (shots if accumulate else 1) * (1 + 0.01 * (c - 1))
+        scale = (shots if acc else 1) * (1 + 0.01 * (c - 1))
         data = np.concatenate([np.asarray(values, dtype=float), per_shot * scale])
-        channels.append(ChannelObject('Group', f'Location {c + 1}', data))
+        channels.append(ChannelObject('Group', name, data))
     path.parent.mkdir(parents=True, exist_ok=True)
     with TdmsWriter(str(path)) as w:
         w.write_segment(channels)

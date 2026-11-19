@@ -7,4 +7,4 @@ Subpackages:
     libs  LIBS loading, processing, metrics, line selection, analysis and plotting
 '''
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
