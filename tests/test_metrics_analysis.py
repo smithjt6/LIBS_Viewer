@@ -110,13 +110,24 @@ def test_ratio_tables_warns_when_total_is_saturated():
     areas = _areas(10.0, total=(100.0, 120.0), total_excl=(60.0, 90.0))   # 40% saturated at 300
     np.testing.assert_allclose(saturated_share(areas), [0.4, 0.25])
     with pytest.warns(RatioWarning, match='40% of the Total light'):
-        ratio_tables(areas, ref=300)
+        ratio_tables(areas, ref=300, total_row=TOTAL)                        # opted in: warns
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        r = ratio_tables(areas, ref=300, total_row=TOTAL_EXCL)               # no warning
+        r = ratio_tables(areas, ref=300)                    # default leaves saturation out: silent
     assert r['R_rel'].loc['L', 400] == pytest.approx((5 / 90) / (10 / 60))
     with pytest.raises(ValueError, match='total_row'):
         ratio_tables(areas, ref=300, total_row='L')
+
+
+def test_areas_table_warns_on_saturated_line_window(temperature_series):
+    y = temperature_series[300]
+    windows = line_windows(WL, y, LINES)
+    on_b = [(399.95, 400.05)]                                # excluded pixels inside line B
+    with pytest.warns(RatioWarning, match=r"\['B 400.00'\]"):
+        areas_table(WL, {300: y}, LINES, windows, exclude=on_b)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        areas_table(WL, {300: y}, LINES, windows, exclude=[(395.0, 396.0)])   # away from lines
 
 
 def test_ratio_tables_nonpositive_reference_gives_nan():

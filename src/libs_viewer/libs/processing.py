@@ -71,16 +71,30 @@ def global_baseline(wl: np.ndarray, y: np.ndarray, method: str = 'snip',
 
 def exclusion_mask(wl: np.ndarray, exclude) -> np.ndarray:
     '''
-    Boolean pixel mask from `exclude`, which may be None (nothing excluded), a boolean array
-    aligned with `wl` (e.g. from `saturated_mask`), or a list of (lo, hi) nm ranges.
+    Boolean pixel mask from `exclude`, which may be None (nothing excluded), a boolean
+    array/sequence aligned with `wl` (e.g. from `saturated_mask`), or an iterable of
+    (lo, hi) nm ranges.
     '''
     if exclude is None:
         return np.zeros(len(wl), dtype=bool)
-    if isinstance(exclude, np.ndarray) and exclude.dtype == bool:
-        return exclude
+
+    arr = np.asarray(exclude)
+    if arr.dtype == bool:
+        if arr.shape != wl.shape:
+            raise ValueError(f"Boolean exclude mask shape {arr.shape} does not match wl shape {wl.shape}")
+        return arr.copy()
+
     mask = np.zeros(len(wl), dtype=bool)
-    for lo, hi in exclude:
+    
+    for item in exclude:
+        try:
+            lo, hi = item
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Expected a boolean mask or (lo, hi) wavelength pairs, got element {item!r}"
+            ) from exc
         mask |= (wl >= lo) & (wl <= hi)
+
     return mask
 
 

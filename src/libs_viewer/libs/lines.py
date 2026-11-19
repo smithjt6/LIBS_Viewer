@@ -20,69 +20,99 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
                  min_side_px: int = 2, candidates: int = 40,
                  db_path: str | Path | None = None) -> pd.DataFrame:
     '''
-    Picks the n strongest NIST lines of an element that are usable in measured spectra.
+    Pick the `n` best NIST lines of one element to measure in the given spectra.
+
+    The candidates are the `candidates` strongest NIST lines of `element` inside the
+    wavelength range. Each goes through three checks in order; the first it fails becomes
+    its status:
+
+        1. Saturation    no excluded (e.g. saturated) pixel within `exclude_pad` nm.
+        2. Interference  no strong line of an `interferents` element (ion stages
+                         `interf_species`) within `interf_tol` nm.
+        3. Detection     tested in every reference spectrum: there must be a peak within
+                         `peak_tol` nm with a prominence of at least `min_prominence` x the
+                         spectrum's median, and at least `min_side_px` pixels between its
+                         apex and the valley on each side (fewer means a neighbouring line
+                         is blended in). A line passes if it is detected in at least one
+                         spectrum.
+
+    The lines that pass are ranked by how many spectra they were detected in, then by NIST
+    intensity, and picked in that order until there are `n`. A line within `min_sep` nm of
+    one already picked is skipped, so the integration windows don't overlap.
 
     Args:
-        element: symbol, e.g. 'Ce'.
+        element: chemical symbol, e.g. 'Ce'.
         wl: wavelength axis (nm) shared by the reference spectra.
-        y_refs: {sample label: reference spectrum} for every sample of this element.
+        y_refs: {sample name: per-shot reference spectrum}, one per sample of this element.
+        n: how many lines to pick.
+        interferents: other elements in the samples whose lines must be avoided.
+        interf_species: ion stages of the interferents to check ('I' neutral, 'II' singly
+            ionized).
+        interf_tol: how close (nm) an interferent line may be.
+        exclude: pixels to stay away from: a boolean mask (e.g. `saturated_mask`) or a list
+            of (lo, hi) nm ranges.
+        exclude_pad: how close (nm) a line may be to an excluded pixel.
+        peak_tol: how far (nm) the measured peak may be from the NIST wavelength.
+        min_prominence: peak threshold, as a multiple of the spectrum's median.
+        min_side_px: pixels needed between the apex and the valley on each side.
+        min_sep: smallest distance (nm) allowed between two picked lines.
+        candidates: how many of the strongest NIST lines to consider.
         db_path: NIST database (default: the libs_viewer data folder).
 
-    A candidate is rejected outright if it is within `exclude_pad` nm of an excluded
-    (saturated) pixel, or within `interf_tol` nm of a strong line (of `interf_species`:
-    neutral and singly ionized by default) of one of `interferents`.
-
-    It is then tested in each reference spectrum, where it counts as *detected* if there is
-    a peak (prominence >= min_prominence x median of that spectrum) within `peak_tol` nm,
-    and the peak is not blended (the valley-to-valley window from `peak_bounds` is at least
-    `min_side_px` pixels wide on both sides of the apex).
-
-    Lines detected in more samples are preferred, then stronger NIST intensity; lines
-    within `min_sep` nm of one already picked are skipped so windows don't overlap.
-
     Returns:
-        DataFrame of every candidate with 'label' (e.g. 'Ce II 418.66'), 'status'
-        ('picked' or the reason it was not) and 'detected_in' (list of sample labels).
+        DataFrame, one row per candidate, strongest NIST line first:
+            species, intensity, wavelength_nm   from NIST
+            status        'picked', or why not: 'near saturated region',
+                          'interference: <lines>', 'no peak in spectrum',
+                          'blended (neighbour line too close)' (both joined with ' / ' when
+                          the spectra disagree), 'too close to a picked line', 'not needed'
+            n_detected    number of spectra the line was detected in
+            detected_in   names of those spectra (keys of `y_refs`)
+            label         e.g. 'Ce II 418.66'
     '''
-
     wl_range = (wl.min(), wl.max())
-
     cands = strong_lines(element, wl_range=wl_range, db_path=db_path).head(candidates)
 
-    others = pd.concat([strong_lines(el, interf_species, wl_range, db_path=db_path).assign(element=el)
-                        for el in interferents], ignore_index=True) if interferents else None
-    
+    others = (
+        pd.concat(
+            [strong_lines(el, interf_species, wl_range, db_path=db_path).assign(element=el)
+             for el in interferents],
+            ignore_index=True,
+        )
+        if interferents else None
+    )
+
     excl_wl = wl[exclusion_mask(wl, exclude)]
-    
-    peak_wl = {name: wl[find_peaks(y, prominence=min_prominence * np.median(y))[0]]
-               for name, y in y_refs.items()}
+    peak_wl = {
+        name: wl[find_peaks(y, prominence=min_prominence * np.median(y))[0]]
+        for name, y in y_refs.items()
+    }
 
-    status, detected_in = [], []
-    for c in cands.wavelength_nm:
-        reason, found, why = '', [], set()
-        if len(excl_wl) and np.abs(excl_wl - c).min() <= exclude_pad:
-            reason = 'near saturated region'
-        elif others is not None and (hit := others[(others.wavelength_nm - c).abs() <= interf_tol]).shape[0]:
-            reason = 'interference: ' + ', '.join(f'{s} {w:.2f}' for s, w in zip(hit.species, hit.wavelength_nm))
-        else:
-            for name, y in y_refs.items():
-                if not len(peak_wl[name]) or np.abs(peak_wl[name] - c).min() > peak_tol:
-                    why.add('no peak in spectrum')
-                elif min(np.diff(peak_bounds(wl, y, c, peak_tol))) < min_side_px:
-                    why.add('blended (neighbour line too close)')
-                else:
-                    found.append(name)
-            if not found:
-                reason = ' / '.join(sorted(why))
-        status.append(reason)
-        detected_in.append(found)
+    # Screen every candidate line
+    screened = [
+        _screen_candidate(
+            c, wl, y_refs, excl_wl, others, peak_wl,
+            exclude_pad=exclude_pad,
+            interf_tol=interf_tol,
+            peak_tol=peak_tol,
+            min_side_px=min_side_px,
+        )
+        for c in cands.wavelength_nm
+    ]
+    status, detected_in = zip(*screened) if screened else ([], [])
 
-    # rank the usable candidates: detected in most samples first, then NIST intensity
-    cands = cands.assign(status=status, n_detected=[len(d) for d in detected_in],
-                         detected_in=detected_in)
-    picked = []
-    order = cands[cands.status == ''].sort_values(['n_detected', 'intensity'], ascending=False, kind='stable')
-    for i, c in order.wavelength_nm.items():
+    cands = cands.assign(
+        status=list(status),
+        n_detected=[len(d) for d in detected_in],
+        detected_in=list(detected_in),
+    )
+
+    # Rank usable candidates (detected in most samples first, then NIST intensity)
+    picked: list[float] = []
+    usable = cands[cands.status == ''].sort_values(
+        ['n_detected', 'intensity'], ascending=False, kind='stable'
+    )
+    for i, c in usable.wavelength_nm.items():
         if any(abs(c - p) < min_sep for p in picked):
             cands.loc[i, 'status'] = 'too close to a picked line'
         elif len(picked) >= n:
@@ -90,5 +120,48 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
         else:
             cands.loc[i, 'status'] = 'picked'
             picked.append(c)
+
     cands['label'] = cands.species + ' ' + cands.wavelength_nm.map('{:.2f}'.format)
     return cands
+
+
+def _screen_candidate(
+    c: float,
+    wl: np.ndarray,
+    y_refs: dict[str, np.ndarray],
+    excl_wl: np.ndarray,
+    others: pd.DataFrame | None,
+    peak_wl: dict[str, np.ndarray],
+    exclude_pad: float,
+    interf_tol: float,
+    peak_tol: float,
+    min_side_px: int,
+) -> tuple[str, list[str]]:
+    '''Return (rejection_reason_or_empty, list_of_samples_where_detected) for one line.'''
+    if len(excl_wl) and np.abs(excl_wl - c).min() <= exclude_pad:
+        return 'near saturated region', []
+
+    if others is not None:
+        hits = others[(others.wavelength_nm - c).abs() <= interf_tol]
+        if not hits.empty:
+            details = ', '.join(f'{s} {w:.2f}' for s, w in zip(hits.species, hits.wavelength_nm))
+            return f'interference: {details}', []
+
+    found: list[str] = []
+    reasons: set[str] = set()
+
+    for name, y in y_refs.items():
+        peaks = peak_wl[name]
+        if not len(peaks) or np.abs(peaks - c).min() > peak_tol:
+            reasons.add('no peak in spectrum')
+            continue
+
+        left, apex, right = peak_bounds(wl, y, c, peak_tol)
+        if min(apex - left, right - apex) < min_side_px:
+            reasons.add('blended (neighbour line too close)')
+            continue
+
+        found.append(name)
+
+    status = '' if found else ' / '.join(sorted(reasons))
+    return status, found

@@ -64,7 +64,15 @@ def test_exclusion_mask_forms():
     assert m.sum() == 21 + 3
     boolean = np.zeros(len(WL), bool)
     boolean[5] = True
-    assert exclusion_mask(WL, boolean) is boolean
+    out = exclusion_mask(WL, boolean)
+    np.testing.assert_array_equal(out, boolean)
+    out[0] = True
+    assert not boolean[0]                                    # a copy: the caller's mask is untouched
+    np.testing.assert_array_equal(exclusion_mask(WL, list(boolean)), boolean)   # plain list works
+    with pytest.raises(ValueError, match='shape'):
+        exclusion_mask(WL, boolean[:-1])
+    with pytest.raises(ValueError, match='pairs'):
+        exclusion_mask(WL, [390.0, 391.0])                   # flat list, not (lo, hi) pairs
 
 
 def test_saturated_mask_flags_and_pads(tmp_path):

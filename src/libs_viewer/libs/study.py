@@ -31,7 +31,8 @@ import pandas as pd
 
 from .. import __version__
 from ..nist.query import resolve_db
-from .analysis import TOTAL, RatioWarning, analyze_sample, areas_table, line_windows, ratio_tables
+from .analysis import (TOTAL_EXCL, RatioWarning, analyze_sample, areas_table, line_windows,
+                       ratio_tables)
 from .lines import select_lines
 from .loading import LayoutWarning, LIBSFile, SettingsWarning, overview_table
 from .plan import study_plan
@@ -63,7 +64,8 @@ class StudyResult:
     Tables (rows indexed by sample, then line / total):
         areas      raw areas, columns = temperatures
         r_direct   A(T) / A(ref)
-        r_rel      [A_line(T)/A_total(T)] / [A_line(ref)/A_total(ref)]; Total rows = R_total
+        r_rel      [A_line(T)/A_total(T)] / [A_line(ref)/A_total(ref)], A_total = settings['total_row']
+                   ('Total (excl. sat.)' by default); Total rows = R_total
         scatter    per (sample, temperature): location-to-location CV (needs 2+ locations) and
                    shot-to-shot CV (needs 2+ single-shot spectra at a location)
     Also:
@@ -146,7 +148,7 @@ class StudyResult:
 def run_study(folder: str | Path, elements: list[str] | None = None, baseline: str = 'snip',
               pattern: str | None = None, manifest=None, temperatures=None, ref: float = 300,
               n_lines: int = 4, min_prominence: float = 0.25, interferents: list[str] | None = None,
-              total_row: str = TOTAL, scatter: bool = True,
+              total_row: str = TOTAL_EXCL, scatter: bool = True,
               db_path: str | Path | None = None) -> StudyResult:
     '''
     Runs a complete temperature study on a folder of Applied Spectra .tdms files.
@@ -163,9 +165,9 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
             (0.25 finds weak lines on a high continuum; select_lines' stricter default is 2).
         interferents: extra elements whose lines must be avoided (the other study elements
             are always included).
-        total_row: the total that R_rel divides the lines by: 'Total' or
-            'Total (excl. sat.)' (saturated pixels left out). A note is added when 'Total'
-            holds a large share of saturated light.
+        total_row: the total used for R_rel, the R_total curve and the Total scatter.
+            'Total (excl. sat.)' (default) leaves the saturated pixels out; 'Total' keeps
+            them, for comparison only (a note is added when they hold much of the light).
         scatter: also compute the location / shot scatter (slower with airpls).
         db_path: NIST database (default: the per-user database).
 
@@ -190,7 +192,7 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
     samples = _build_samples(plan, files, notes)
     line_tables = _pick_lines(samples, wl, ref, n_lines, min_prominence, interferents, db, notes)
     areas, r_direct, r_rel = _measure(samples, wl, baseline, ref, total_row, notes)
-    scatter_df = _scatter(samples, wl, baseline, ref) if scatter else pd.DataFrame()
+    scatter_df = _scatter(samples, wl, baseline, ref, total_row) if scatter else pd.DataFrame()
 
     settings = {'libs_viewer': __version__, 'created': datetime.now().isoformat(timespec='seconds'),
                 'folder': str(folder.resolve()), 'pattern': pattern,
@@ -286,17 +288,22 @@ def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dic
 
 # ------------------------------------------------------------------ 3. samples
 def _build_samples(plan: pd.DataFrame, files: dict[str, LIBSFile], notes: list[str]) -> dict[str, Sample]:
-    samples = {}
-    for name, g in plan.groupby('sample', sort=False):
+    samples: dict[str, Sample] = {}
+
+    for key, g in plan.groupby('sample', sort=False):
+        name = str(key)                     # groupby keys are typed as any scalar; samples are str
         by_t = {t: files[k] for k, t in zip(g.file, g.temperature)}
         how = {t: f.describe() for t, f in by_t.items()}
+        
         if len(set(how.values())) > 1:
             notes.append(f'{name}: acquired differently across temperatures '
                          f"({'; '.join(f'{t}: {d}' for t, d in how.items())}); per-shot averages "
                          'still compare, scatter values do not')
-        samples[name] = Sample(name=name, element=g.element.iloc[0], files=by_t,
+            
+        samples[name] = Sample(name=name, element=str(g.element.iloc[0]), files=by_t,
                                spectra={t: per_shot_spectrum(f) for t, f in by_t.items()},
                                mask=saturated_mask(list(by_t.values())))
+        
     return samples
 
 
@@ -315,24 +322,30 @@ def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, in
                              min_prominence=min_prominence, db_path=db)
         tables[el] = table
         picked = table[table.status == 'picked']
+        # (label, nm, samples it was detected in) for every picked line
+        picked_lines = list(zip(picked['label'].astype(str), picked['wavelength_nm'].astype(float),
+                                picked['detected_in']))
         for s in group:
-            s.lines = {r.label: float(r.wavelength_nm) for r in picked.itertuples() if s.name in r.detected_in}
+            s.lines = {label: nm for label, nm, found in picked_lines if s.name in found}
             if not s.lines:
                 notes.append(f'{s.name}: no {el} line detected at {ref} C; only totals are reported')
     return tables
 
 
 # ------------------------------------------------------------------ 5. areas and ratios
-def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row, notes: list[str]):
+def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row,
+             notes: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     '''analyze_sample + ratio_tables per sample; ratio warnings go into `notes`.'''
-    areas, r_direct, r_rel = {}, {}, {}
+    areas: dict[str, pd.DataFrame] = {}
+    r_direct: dict[str, pd.DataFrame] = {}
+    r_rel: dict[str, pd.DataFrame] = {}
 
     for s in samples.values():
-        s.areas = analyze_sample(wl, s.spectra, s.lines, method=baseline, exclude=s.mask, ref=ref)
-
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always', RatioWarning)
-            r = ratio_tables(s.areas, ref=ref, total_row=total_row)
+            a = analyze_sample(wl, s.spectra, s.lines, method=baseline, exclude=s.mask, ref=ref)
+            r = ratio_tables(a, ref=ref, total_row=total_row)
+        s.areas = a
 
         for w in caught:
             if issubclass(w.category, RatioWarning):
@@ -340,10 +353,10 @@ def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row, notes: li
             else:
                 warnings.warn(w.message, w.category, stacklevel=2)
 
-        areas[s.name], r_direct[s.name], r_rel[s.name] = s.areas, r['R_direct'], r['R_rel']
+        areas[s.name], r_direct[s.name], r_rel[s.name] = a, r['R_direct'], r['R_rel']
         s.windows = line_windows(wl, s.spectra[ref], s.lines)
 
-    def stack(d):
+    def stack(d: dict[str, pd.DataFrame]) -> pd.DataFrame:
         return pd.concat(d, names=['sample', 'row'])
     
     return stack(areas), stack(r_direct), stack(r_rel)
@@ -355,13 +368,14 @@ def _cv(table: pd.DataFrame) -> pd.Series:
     return 100 * table.std(axis=1) / table.mean(axis=1)
 
 
-def _scatter(samples: dict[str, Sample], wl, baseline, ref) -> pd.DataFrame:
+def _scatter(samples: dict[str, Sample], wl, baseline, ref, total_row=TOTAL_EXCL) -> pd.DataFrame:
     '''
     Per (sample, temperature):
         location CV   spread of the per-location mean spectra (2+ locations)
         shot CV       spread of single-shot spectra within a location, averaged over the
                       locations with 2+ single shots
-    Each for the lines (mean over the sample's lines) and for the Total area.
+    Each for the lines (mean over the sample's lines) and for the Total area ('Total' here
+    is `total_row`, the same total R_rel uses).
     '''
     rows = {}
 
@@ -376,7 +390,7 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref) -> pd.DataFrame:
             if locs.shape[1] > 1:
                 cv = _cv(areas_table(wl, locs, s.lines, windows, method=baseline, exclude=s.mask))
                 row['location CV, lines (%)'] = cv[lines].mean() if lines else np.nan
-                row['location CV, Total (%)'] = cv[TOTAL]
+                row['location CV, Total (%)'] = cv[total_row]
 
             single = f.acquisitions[f.acquisitions['shots_summed'] == 1]
             per_loc = single.groupby('location').size()
@@ -386,12 +400,14 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref) -> pd.DataFrame:
                 g = a.T.groupby(single['location'])
                 cv = (100 * g.std() / g.mean())[per_loc > 1].mean()
                 row['shot CV, lines (%)'] = cv[lines].mean() if lines else np.nan
-                row['shot CV, Total (%)'] = cv[TOTAL]
+                row['shot CV, Total (%)'] = cv[total_row]
 
             if row:
                 rows[(s.name, t)] = {'locations': f.n_locations, 'spectra': f.spectra.shape[1], **row}
 
     cols = ['locations', 'spectra', 'location CV, lines (%)', 'location CV, Total (%)',
             'shot CV, lines (%)', 'shot CV, Total (%)']
-    
-    return pd.DataFrame.from_dict(rows, orient='index').reindex(columns=cols)
+    df = pd.DataFrame.from_dict(rows, orient='index').reindex(columns=cols)
+    if len(df):
+        df.index.names = ['sample', 'temperature']
+    return df

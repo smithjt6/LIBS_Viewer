@@ -31,7 +31,8 @@ TOTAL_EXCL = 'Total (excl. sat.)'  # the same, with the excluded (e.g. saturated
 
 
 class RatioWarning(UserWarning):
-    '''A ratio from `ratio_tables` may mislead (saturated Total, or a bad reference area).'''
+    '''An area or ratio may mislead: saturated pixels in a line window or in the Total used
+    for R_rel, or a zero / negative reference area.'''
 
 
 def line_windows(wl: np.ndarray, y_ref: np.ndarray, lines: dict[str, float],
@@ -95,10 +96,21 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
     Returns:
         DataFrame. Rows: one per line, then 'Total', then 'Total (excl. sat.)'.
         Columns: one per spectrum, named as in `spectra`. Units: counts·nm per shot.
+        'Total' still contains the saturated pixels; it is kept for reference only.
+
+    Warns (RatioWarning):
+        a line window contains excluded pixels (that line's area is unreliable).
     '''
 
     pairs = spectra.items() if isinstance(spectra, (dict, pd.DataFrame)) else spectra
     excluded = exclusion_mask(wl, exclude)  # build the mask once, not once per spectrum
+
+    # a line window over excluded (saturated) pixels measures the detector's ceiling, not the line
+    clipped = [label for label, (left, right) in windows.items()
+               if label in lines and excluded[left:right + 1].any()]
+    if clipped:
+        warnings.warn(f'line window(s) {clipped} contain excluded (saturated) pixels; '
+                      'their areas are unreliable', RatioWarning, stacklevel=2)
 
     columns = {}
 
@@ -172,7 +184,7 @@ def saturated_share(areas: pd.DataFrame) -> pd.Series:
     return 1 - excluded / total
 
 
-def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL,
+def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL_EXCL,
                  max_saturated_share: float = 0.05) -> dict[str, pd.DataFrame]:
     '''
     How much each area changed compared with the reference temperature (1.0 = no change).
@@ -181,7 +193,9 @@ def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL,
         areas: the table from `analyze_sample` (rows = lines + the two totals,
             columns = temperatures).
         ref: the reference temperature column. Every ratio is 1.0 there.
-        total_row: which total to divide the lines by for 'R_rel' (TOTAL or TOTAL_EXCL).
+        total_row: which total to divide the lines by for 'R_rel'. TOTAL_EXCL (default)
+            leaves the saturated pixels out: clipped pixels report the detector's ceiling,
+            not the light. TOTAL keeps them, for comparison only.
         max_saturated_share: warn if total_row is TOTAL and more than this share of the
             Total light is in saturated pixels at any temperature (see `saturated_share`).
 

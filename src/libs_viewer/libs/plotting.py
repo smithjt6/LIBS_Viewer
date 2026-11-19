@@ -206,8 +206,10 @@ def plot_baseline(wavelengths, intensities, method: str = 'snip', max_half_windo
 def plot_study(result, log_y: bool = True) -> Figure:
     """
     One panel per sample of a `study.StudyResult`: R_rel of every line (markers) and
-    R_total (black dashed) against temperature, relative to the reference temperature.
+    R_total (black dashed; the total R_rel was divided by) against temperature, relative
+    to the reference temperature.
     """
+    total_row = result.settings.get('total_row', TOTAL)
     samples = result.samples
     fig = NotebookFigure(figsize=(4 * len(samples), 4), layout='constrained')
     axes = np.atleast_1d(fig.subplots(1, len(samples), sharey=True))
@@ -216,8 +218,8 @@ def plot_study(result, log_y: bool = True) -> Figure:
         temps = [t for t in rel.columns if rel[t].notna().any()]
         for label in rel.index.drop([TOTAL, TOTAL_EXCL]):
             ax.plot(temps, rel.loc[label, temps], marker='o', label=label)
-        ax.plot(temps, result.r_direct.loc[(sample, TOTAL), temps], color='k', ls='--', marker='s',
-                label='R_total')
+        ax.plot(temps, result.r_direct.loc[(sample, total_row), temps], color='k', ls='--', marker='s',
+                label='R_total' + (' (excl. sat.)' if total_row == TOTAL_EXCL else ''))
         ax.axhline(1, color='grey', lw=0.5)
         ax.set_xticks(temps)
         ax.set_title(sample)
