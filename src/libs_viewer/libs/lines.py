@@ -42,13 +42,18 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
 
     Returns:
         DataFrame of every candidate with 'label' (e.g. 'Ce II 418.66'), 'status'
-        ('picked' or the reason it was not) and 'detected_in' (comma-separated samples).
+        ('picked' or the reason it was not) and 'detected_in' (list of sample labels).
     '''
+
     wl_range = (wl.min(), wl.max())
+
     cands = strong_lines(element, wl_range=wl_range, db_path=db_path).head(candidates)
+
     others = pd.concat([strong_lines(el, interf_species, wl_range, db_path=db_path).assign(element=el)
                         for el in interferents], ignore_index=True) if interferents else None
+    
     excl_wl = wl[exclusion_mask(wl, exclude)]
+    
     peak_wl = {name: wl[find_peaks(y, prominence=min_prominence * np.median(y))[0]]
                for name, y in y_refs.items()}
 
@@ -74,7 +79,7 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
 
     # rank the usable candidates: detected in most samples first, then NIST intensity
     cands = cands.assign(status=status, n_detected=[len(d) for d in detected_in],
-                         detected_in=[', '.join(d) for d in detected_in])
+                         detected_in=detected_in)
     picked = []
     order = cands[cands.status == ''].sort_values(['n_detected', 'intensity'], ascending=False, kind='stable')
     for i, c in order.wavelength_nm.items():

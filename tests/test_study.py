@@ -102,18 +102,40 @@ def test_run_study_end_to_end(study, nist_db):
     flat = r.r_direct.loc['Ce s2'].drop(index=[TOTAL])
     np.testing.assert_allclose(flat[[350, 400]].to_numpy(dtype=float), 1.0, rtol=0.02)
     assert r.notes == []
+    # accumulated files: 3 locations, no single shots -> location CV only
     assert len(r.scatter) == 6 and (r.scatter.locations == 3).all()
+    assert r.scatter['location CV, Total (%)'].notna().all() and r.scatter['shot CV, Total (%)'].isna().all()
     assert r.settings['baseline'] == 'snip' and r.settings['pattern'] == PATTERN
 
 
-def test_run_study_drops_locations_with_other_settings(study, nist_db):
+def test_run_study_drops_spectra_with_other_settings(study, nist_db):
     # replace one file with a mixed one: location 3 was acquired with a different energy
     write_tdms(study / 'Ce' / 's2' / 'Ce_s2_300C.tdms', ce_spectrum(1), wl=WL, energies=[80, 80, 10])
     r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False)
     row = r.plan.set_index('file').loc['Ce/s2/Ce_s2_300C.tdms']
     assert row.use_columns == ['Location 1', 'Location 2']
-    assert any('used 2 of 3 grid locations' in n for n in r.notes)
+    assert any('used 2 locations x 10 shots' in n and 'dropped 1 location' in n for n in r.notes)
     assert r.scatter.empty
+
+
+def test_run_study_single_shots_give_shot_scatter(study, nist_db):
+    # s2 at 300 C stored as single shots: 2 locations x 4 shots
+    write_tdms(study / 'Ce' / 's2' / 'Ce_s2_300C.tdms', ce_spectrum(1), wl=WL, n_cols=8, shots=4,
+               accumulate=0, locations=[1] * 4 + [2] * 4)
+    r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db)
+    row = r.scatter.loc[('Ce s2', 300)]
+    assert row.locations == 2 and row.spectra == 8
+    assert np.isfinite(row['shot CV, Total (%)']) and np.isfinite(row['location CV, Total (%)'])
+    assert any(n.startswith('Ce s2: acquired differently') for n in r.notes)
+    # the per-shot average is unaffected by how the shots were stored
+    flat = r.r_direct.loc['Ce s2'].drop(index=[TOTAL])
+    np.testing.assert_allclose(flat[[350, 400]].to_numpy(dtype=float), 1.0, rtol=0.03)
+
+
+def test_run_study_reports_layout_warnings_in_notes(study, nist_db):
+    write_tdms(study / 'Ce' / 's2' / 'Ce_s2_300C.tdms', ce_spectrum(1), wl=WL, locations=[1, 1, 2])
+    r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False)
+    assert any('location 1 holds 2 accumulated spectra' in n for n in r.notes)
 
 
 def test_run_study_errors(study, nist_db, tmp_path):

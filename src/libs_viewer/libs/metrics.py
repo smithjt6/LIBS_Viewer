@@ -18,8 +18,7 @@ def total_area(wl: np.ndarray, corrected: np.ndarray, exclude=None) -> float:
             array (see `saturated_mask`) or a list of (lo, hi) nm ranges. Masked pixels
             are set to zero so the integration doesn't bridge across them.
     '''
-    y = np.asarray(corrected, dtype=float).copy()
-    y[exclusion_mask(wl, exclude)] = 0.0
+    y = np.where(exclusion_mask(wl, exclude), 0.0, np.asarray(corrected, dtype=float))
     return float(np.trapezoid(y, wl))
 
 
@@ -39,14 +38,49 @@ def peak_bounds(wl: np.ndarray, y: np.ndarray, center: float, search: float = 0.
     near = np.flatnonzero(np.abs(wl - center) <= search)
     if len(near) == 0:
         raise ValueError(f'{center} nm is outside the wavelength range')
+    
     apex = near[np.argmax(y[near])]
     left = apex
+
     while left > 0 and y[left - 1] <= y[left] and wl[apex] - wl[left - 1] <= max_half_width:
         left -= 1
     right = apex
+
     while right < len(y) - 1 and y[right + 1] <= y[right] and wl[right + 1] - wl[apex] <= max_half_width:
         right += 1
+
     return left, apex, right
+
+
+def line_window(wl: np.ndarray, y: np.ndarray, center: float, half_width: float | None = None,
+                search: float = 0.1, max_half_width: float = 0.35,
+                min_px: int = 3) -> tuple[int, int]:
+    '''
+    Where one emission line sits in a spectrum, as a (left, right) pixel range.
+
+    half_width=None (default): found from the data with `peak_bounds`, from the apex near
+    `center` down to the valley on each side. A number in nm: the fixed window
+    center ± half_width instead.
+
+    Returns:
+        (left, right) pixel indices. Both ends are included, so the line is y[left:right + 1].
+
+    Raises:
+        ValueError: the window is outside the wavelength range or has fewer than `min_px` pixels.
+    '''
+    if half_width is None:
+        left, _, right = peak_bounds(wl, y, center, search, max_half_width)
+
+    else:
+        idx = np.flatnonzero((wl >= center - half_width) & (wl <= center + half_width))
+        if len(idx) == 0:
+            raise ValueError(f'{center} ± {half_width} nm is outside the wavelength range')
+        left, right = idx[0], idx[-1]
+
+    if right - left + 1 < min_px:
+        raise ValueError(f'window around {center} nm has only {right - left + 1} pixels')
+    
+    return int(left), int(right)
 
 
 def integrate_local_peak(wl: np.ndarray, y: np.ndarray, center: float,
@@ -56,36 +90,38 @@ def integrate_local_peak(wl: np.ndarray, y: np.ndarray, center: float,
     '''
     Area of one emission line above a straight local baseline.
 
-    By default (half_width=None) the window is found from the data with `peak_bounds`:
-    the apex nearest `center`, out to the valley on each side, so the baseline is the line
-    "across the bottom where the peak begins". With a number for `half_width` a fixed
-    window [center - half_width, center + half_width] is used instead. `bounds`
-    = (left, right) pixel indices overrides both; use it to apply the window found on a
-    reference spectrum to other spectra so every temperature is integrated over the same pixels.
+    Steps:
+        1. Window: `bounds` = (left, right) if given, otherwise found with `line_window`
+           (peak to valley by default, or center ± `half_width`). Pass the `bounds` found
+           on a reference spectrum to measure every temperature over the same pixels.
+        2. Baseline: a straight line through the mean of the first `edge_pts` pixels and
+           the mean of the last `edge_pts` pixels of the window.
+        3. Area: integrate what is above that line.
 
-    The baseline joins the mean of the first and last `edge_pts` pixels of the window and
-    the area above it is integrated. Pass the per-shot spectrum (not the continuum-corrected
-    one) so two baselines aren't subtracted.
+    Pass the per-shot spectrum, not the continuum-corrected one: the local baseline already
+    removes the background under the line.
 
     Returns:
-        dict with 'area', 'apex_nm', 'wl', 'y', 'local_baseline', 'net' (arrays for plotting).
+        dict with 'area' (counts·nm per shot), 'apex_nm', and for plotting the window's
+        'wl', 'y', 'local_baseline' and 'net' (= y - local_baseline).
     '''
-    if bounds is not None:
-        sl = slice(bounds[0], bounds[1] + 1)
-        apex = sl.start + int(np.argmax(y[sl]))
-    elif half_width is None:
-        left, apex, right = peak_bounds(wl, y, center, search, max_half_width)
-        sl = slice(left, right + 1)
-    else:
-        idx = np.flatnonzero((wl >= center - half_width) & (wl <= center + half_width))
-        sl = slice(idx[0], idx[-1] + 1)
-        apex = sl.start + int(np.argmax(y[sl]))
-    w, s = wl[sl], y[sl]
-    if len(w) < max(3, 2 * edge_pts + 1):
-        raise ValueError(f'window around {center} nm has only {len(w)} pixels')
-    x1, x2 = w[:edge_pts].mean(), w[-edge_pts:].mean()
-    y1, y2 = s[:edge_pts].mean(), s[-edge_pts:].mean()
-    local = y1 + (y2 - y1) * (w - x1) / (x2 - x1)  # straight line, extrapolated to the edges
-    net = s - local
-    return {'area': float(np.trapezoid(net, w)), 'apex_nm': float(wl[apex]), 'wl': w, 'y': s,
-            'local_baseline': local, 'net': net}
+    # 1. finding window for integration
+    if bounds is None:
+        bounds = line_window(wl, y, center, half_width, search, max_half_width)
+    left, right = bounds
+    x = wl[left:right + 1]
+    signal = y[left:right + 1]
+    if len(x) < max(3, 2 * edge_pts + 1):
+        raise ValueError(f'window around {center} nm has only {len(x)} pixels')
+
+    # 2. straight baseline through the two edges
+    x_left, x_right = x[:edge_pts].mean(), x[-edge_pts:].mean()
+    y_left, y_right = signal[:edge_pts].mean(), signal[-edge_pts:].mean()
+    slope = (y_right - y_left) / (x_right - x_left)
+    baseline = y_left + slope * (x - x_left)
+
+    # 3. area above it
+    net = signal - baseline
+    return {'area': float(np.trapezoid(net, x)),
+            'apex_nm': float(x[np.argmax(signal)]),
+            'wl': x, 'y': signal, 'local_baseline': baseline, 'net': net}

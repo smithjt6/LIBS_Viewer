@@ -22,8 +22,8 @@ the same library, ICP-MS (Agilent 7000).
 
 ## Layout
 
-- [src/libs_viewer/libs/](src/libs_viewer/libs/): `loading` (LIBSFile, LoadLIBSData, study_plan, temperature_from_name),
-  `processing` (per-shot scaling, baseline, saturation), `metrics` (total / line areas),
+- [src/libs_viewer/libs/](src/libs_viewer/libs/): `loading` (LIBSFile, LoadLIBSData),
+  `plan` (study_plan, temperature_from_name), `processing` (per-shot scaling, baseline, saturation), `metrics` (total / line areas),
   `lines` (NIST line selection), `analysis` (analyze_sample, ratio tables), `study` (run_study: the
   whole pipeline in one call, mirrored step by step in examples/end_to_end_temp_study.ipynb),
   `plotting` (returns Figure).
@@ -33,6 +33,19 @@ the same library, ICP-MS (Agilent 7000).
 - [src/libs_viewer/core/paths.py](src/libs_viewer/core/paths.py): per-user data folder
   (`%LOCALAPPDATA%\libs_viewer`, override `LIBS_VIEWER_DATA`) holding the NIST DB and page cache.
 - A legacy `nist_handbook.sqlite` / `nist_cache/` may still sit in the repo root (gitignored).
+
+## Data model
+
+- One `.tdms` file stores spectra in channels `Grid Location # L-S` (location L, shot S).
+  Accumulate = 1: each spectrum is N summed shots at one location. Accumulate = 0: each is one
+  shot, N per location. Files can mix both.
+- `LIBSFile.acquisitions` has one row per stored spectrum (`location`, `shot`, `shots_summed`,
+  positions, every parameter). Per-shot scaling divides by `shots_summed`. Select spectra with
+  `f.subset(columns=, locations=)` rather than passing column lists into functions;
+  `f.accumulate()` sums each location's spectra. Loader problems raise `SettingsWarning` /
+  `LayoutWarning` (both UserWarning); `run_study` turns layout warnings into `notes`.
+- Words: *spectrum/column* = one stored spectrum, *location* = grid location, *shot* = laser shot.
+  Never call a column a "grid location".
 
 ## Rules
 

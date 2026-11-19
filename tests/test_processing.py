@@ -1,29 +1,42 @@
 import numpy as np
 import pytest
 
-from libs_viewer.libs import (LIBSFile, exclusion_mask, global_baseline, per_shot_spectrum,
-                              saturated_mask, shots_per_column)
+from libs_viewer.libs import (LIBSFile, exclusion_mask, global_baseline, location_spectra,
+                              per_shot_columns, per_shot_spectrum, saturated_mask)
 from conftest import LINES, WL, continuum, synth_spectrum, write_tdms
 
 
 def test_per_shot_divides_accumulated_columns(tdms_file):
     path, y = tdms_file
     f = LIBSFile.from_tdms(path)
-    assert shots_per_column(f) == 10
+    np.testing.assert_allclose(per_shot_columns(f)['Location 2'], y, rtol=1e-12)
     np.testing.assert_allclose(per_shot_spectrum(f), y, rtol=1e-12)
 
 
 def test_per_shot_leaves_single_shot_files(tmp_path):
     y = synth_spectrum({'B 400.00': 100.0})
     f = LIBSFile.from_tdms(write_tdms(tmp_path / 'x.tdms', y, accumulate=0, shots=10))
-    assert shots_per_column(f) == 1
+    np.testing.assert_allclose(per_shot_columns(f)['Location 2'], y, rtol=1e-12)
     np.testing.assert_allclose(per_shot_spectrum(f), y, rtol=1e-12)
 
 
-def test_per_shot_column_subset(tdms_file):
+def test_per_shot_subset(tdms_file):
     f = LIBSFile.from_tdms(tdms_file[0])
-    one = per_shot_spectrum(f, columns=['Location 3'])
+    one = per_shot_spectrum(f.subset(columns=['Location 3']))
     np.testing.assert_allclose(one, tdms_file[1] * 1.01, rtol=1e-12)
+
+
+def test_mixed_file_weights_every_shot_equally(tmp_path):
+    '''Location 1: 5 accumulated shots (x0.99); location 2: 10 single shots (x1.00 ... x1.09).'''
+    y = synth_spectrum({'B 400.00': 100.0})
+    with pytest.warns(UserWarning):
+        f = LIBSFile.from_tdms(write_tdms(tmp_path / 'm.tdms', y, n_cols=11, shots=5,
+                                          locations=[1] + [2] * 10, accumulates=[1] + [0] * 10))
+    np.testing.assert_allclose(per_shot_spectrum(f), y * (5 * 0.99 + 10.45) / 15, rtol=1e-12)
+    loc = location_spectra(f)
+    assert list(loc.columns) == [1, 2]
+    np.testing.assert_allclose(loc[1], y * 0.99, rtol=1e-12)
+    np.testing.assert_allclose(loc[2], y * 1.045, rtol=1e-12)
 
 
 @pytest.mark.parametrize('method', ['snip', 'airpls'])
