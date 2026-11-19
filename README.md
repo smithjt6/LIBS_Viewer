@@ -148,11 +148,11 @@ Everything below except plotting is importable from `libs_viewer.libs`
 | Baseline check / study figure | `plot_baseline`, `plot_study` | [plotting.py](src/libs_viewer/libs/plotting.py) | Spectrum with fitted continuum + corrected spectrum; R_rel / R_total vs temperature per sample |
 | Shot scaling | `per_shot_spectrum`, `per_shot_columns`, `location_spectra` | [processing.py](src/libs_viewer/libs/processing.py) | All counts ÷ all shots (every shot weighs the same, accumulated or not); per stored spectrum; per location |
 | Continuum removal | `global_baseline` (`'snip'`, `'airpls'`) | [processing.py](src/libs_viewer/libs/processing.py) | via `pybaselines` |
-| Saturation | `saturated_mask`, `exclusion_mask` | [processing.py](src/libs_viewer/libs/processing.py) | Flags clipped pixels across all files of a sample |
+| Saturation | `saturated_mask`, `exclusion_mask` | [processing.py](src/libs_viewer/libs/processing.py) | Flags clipped pixels across all files of a sample (single shots at full scale; accumulated spectra from ~80% of it, to catch shots that clipped only some of the time) |
 | Total area | `total_area` | [metrics.py](src/libs_viewer/libs/metrics.py) | Optional exclusion of saturated pixels / nm ranges |
-| Line area | `peak_bounds`, `integrate_local_peak` | [metrics.py](src/libs_viewer/libs/metrics.py) | Valley-to-valley window, straight local baseline |
+| Line area | `peak_bounds`, `line_window`, `integrate_local_peak` | [metrics.py](src/libs_viewer/libs/metrics.py) | Valley-to-valley (or fixed) window, straight local baseline through the mean of 2 edge pixels each side |
 | Line choice | `select_lines` | [lines.py](src/libs_viewer/libs/lines.py) | NIST candidates filtered by detection, blending, saturation, interferents |
-| Sample tables | `analyze_sample`, `areas_table`, `ratio_tables` | [analysis.py](src/libs_viewer/libs/analysis.py) | Same pixel windows at every temperature; `areas_table` measures any set of spectra (e.g. per location); `R_direct` and `R_rel` tables |
+| Sample tables | `analyze_sample`, `areas_table`, `ratio_tables` | [analysis.py](src/libs_viewer/libs/analysis.py) | Same pixel windows at every temperature; `areas_table` measures any set of spectra (e.g. per location); `R_direct` and `R_rel` tables. `RatioWarning` when the Total is largely saturated (`saturated_share`) or a reference area is ≤ 0 (ratios NaN) |
 | Spectrum plot | `plot_spectrum` | [plotting.py](src/libs_viewer/libs/plotting.py) | Log-y, zoom, peak labels, reference lines; returns a matplotlib `Figure` |
 | Line lookups | `strong_lines`, `database_info` | [query.py](src/libs_viewer/nist/query.py) | Read-only; wavelengths returned in nm |
 | Line database | `libs-viewer nist build` | [build.py](src/libs_viewer/nist/build.py) | User only. See [NIST line database](#nist-line-database) |

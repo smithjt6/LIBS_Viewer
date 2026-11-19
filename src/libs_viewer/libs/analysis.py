@@ -17,10 +17,12 @@ If the window moved with each spectrum, part of the change would come from the w
 Everything here returns numbers or DataFrames. Nothing plots.
 '''
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
-from .metrics import integrate_local_peak, line_window, total_area
+from .metrics import EDGE_PTS, integrate_local_peak, line_window, total_area
 from .processing import exclusion_mask, global_baseline
 
 # Row names for the two total-area rows in every areas table
@@ -28,8 +30,13 @@ TOTAL = 'Total'                    # area of the whole background-free spectrum
 TOTAL_EXCL = 'Total (excl. sat.)'  # the same, with the excluded (e.g. saturated) pixels left out
 
 
+class RatioWarning(UserWarning):
+    '''A ratio from `ratio_tables` may mislead (saturated Total, or a bad reference area).'''
+
+
 def line_windows(wl: np.ndarray, y_ref: np.ndarray, lines: dict[str, float],
-                 half_width: float | None = None, edge_pts: int = 1) -> dict[str, tuple[int, int]]:
+                 half_width: float | None = None,
+                 edge_pts: int = EDGE_PTS) -> dict[str, tuple[int, int]]:
     '''
     Find where each line sits in the reference spectrum, as a (left, right) pixel range.
 
@@ -58,7 +65,7 @@ def line_windows(wl: np.ndarray, y_ref: np.ndarray, lines: dict[str, float],
 
 def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[str, tuple[int, int]],
                 method: str = 'snip', max_half_window: int = 40, lam: float = 1e6,
-                edge_pts: int = 1, exclude=None) -> pd.DataFrame:
+                edge_pts: int = EDGE_PTS, exclude=None) -> pd.DataFrame:
     '''
     Measure every line and the total area in several spectra. One column per spectrum.
 
@@ -108,8 +115,8 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
 
 def analyze_sample(wl: np.ndarray, spectra_by_temp: dict[float, np.ndarray],
                    lines: dict[str, float], method: str = 'snip', max_half_window: int = 40,
-                   lam: float = 1e6, half_width: float | None = None, edge_pts: int = 1,
-                   exclude=None, ref: int = 300) -> pd.DataFrame:
+                   lam: float = 1e6, half_width: float | None = None, edge_pts: int = EDGE_PTS,
+                   exclude=None, ref: float = 300) -> pd.DataFrame:
     '''
     Line areas and total areas of one sample at every temperature.
 
@@ -149,7 +156,18 @@ def analyze_sample(wl: np.ndarray, spectra_by_temp: dict[float, np.ndarray],
     return df
 
 
-def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL) -> dict[str, pd.DataFrame]:
+def saturated_share(areas: pd.DataFrame) -> pd.Series:
+    '''
+    Share (0 to 1) of the Total light that sits in the excluded (saturated) pixels, per column.
+
+    Clipped pixels cannot get brighter, so when this share is large the 'Total' row
+    understates how the light changed, and R_rel divided by it is pulled toward 1.
+    '''
+    return 1 - areas.loc[TOTAL_EXCL] / areas.loc[TOTAL]
+
+
+def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL,
+                 max_saturated_share: float = 0.05) -> dict[str, pd.DataFrame]:
     '''
     How much each area changed compared with the reference temperature (1.0 = no change).
 
@@ -158,6 +176,8 @@ def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL) -> dic
             columns = temperatures).
         ref: the reference temperature column. Every ratio is 1.0 there.
         total_row: which total to divide the lines by for 'R_rel' (TOTAL or TOTAL_EXCL).
+        max_saturated_share: warn if total_row is TOTAL and more than this share of the
+            Total light is in saturated pixels at any temperature (see `saturated_share`).
 
     Returns:
         Two tables shaped like `areas`:
@@ -171,13 +191,31 @@ def ratio_tables(areas: pd.DataFrame, ref: float, total_row: str = TOTAL) -> dic
                         with the same total ratios.
 
     Raises:
-        ValueError: `ref` is not a column of `areas`.
+        ValueError: `ref` is not a column of `areas`, or `total_row` is not a total row.
+
+    Warns (RatioWarning):
+        - the Total used for R_rel has more than `max_saturated_share` saturated light.
+        - a row's area at `ref` is zero or negative: its ratios are NaN instead of inf.
     '''
     if ref not in areas.columns:
         raise ValueError(f'reference temperature {ref} not in the columns {list(areas.columns)}')
-    r_direct = areas.div(areas[ref], axis=0)
+    if total_row not in (TOTAL, TOTAL_EXCL):
+        raise ValueError(f'total_row must be {TOTAL!r} or {TOTAL_EXCL!r}, got {total_row!r}')
+
+    share = saturated_share(areas)
+    if total_row == TOTAL and share.max() > max_saturated_share:
+        warnings.warn(f'{share.max():.0%} of the Total light is in saturated pixels (at {share.idxmax()} C), '
+                      f'so R_rel divided by {TOTAL!r} is pulled toward 1; '
+                      f'use total_row={TOTAL_EXCL!r} to leave those pixels out', RatioWarning, stacklevel=2)
+
+    ref_area = areas[ref].where(areas[ref] > 0)          # zero / negative -> NaN, so no inf ratios
+    if ref_area.isna().any():
+        warnings.warn(f'area at {ref} C is zero, negative or missing for {list(ref_area.index[ref_area.isna()])}; '
+                      'their ratios are NaN', RatioWarning, stacklevel=2)
+    r_direct = areas.div(ref_area, axis=0)
 
     line_share = areas.drop(index=[TOTAL, TOTAL_EXCL]) / areas.loc[total_row]
-    r_rel = pd.concat([line_share.div(line_share[ref], axis=0),
+    ref_share = line_share[ref].where(line_share[ref] > 0)
+    r_rel = pd.concat([line_share.div(ref_share, axis=0),
                        r_direct.loc[[TOTAL, TOTAL_EXCL]]])
     return {'R_direct': r_direct, 'R_rel': r_rel}

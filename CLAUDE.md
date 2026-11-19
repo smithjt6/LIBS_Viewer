@@ -43,7 +43,8 @@ the same library, ICP-MS (Agilent 7000).
   positions, every parameter). Per-shot scaling divides by `shots_summed`. Select spectra with
   `f.subset(columns=, locations=)` rather than passing column lists into functions;
   `f.accumulate()` sums each location's spectra. Loader problems raise `SettingsWarning` /
-  `LayoutWarning` (both UserWarning); `run_study` turns layout warnings into `notes`.
+  `LayoutWarning` (both UserWarning); `ratio_tables` raises `RatioWarning`; `run_study` turns
+  layout and ratio warnings into `notes`.
 - Words: *spectrum/column* = one stored spectrum, *location* = grid location, *shot* = laser shot.
   Never call a column a "grid location".
 

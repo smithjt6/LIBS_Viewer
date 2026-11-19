@@ -75,3 +75,13 @@ def test_saturated_mask_flags_and_pads(tmp_path):
     assert np.flatnonzero(mask).tolist() == [398, 399, 400, 401, 402]
     clean = LIBSFile.from_tdms(write_tdms(tmp_path / 'ok.tdms', synth_spectrum({})))
     assert not saturated_mask([clean]).any()
+
+
+def test_saturated_mask_partial_clipping_in_accumulated_spectra(tmp_path):
+    '''Some of 10 shots clipped: the per-shot mean (55000) is below full scale but still flagged.'''
+    y = synth_spectrum({})
+    y[400] = 55000.0
+    acc = LIBSFile.from_tdms(write_tdms(tmp_path / 'acc.tdms', y, accumulate=1))
+    assert np.flatnonzero(saturated_mask([acc], pad_px=0)).tolist() == [400]
+    single = LIBSFile.from_tdms(write_tdms(tmp_path / 'one.tdms', y, accumulate=0))
+    assert not saturated_mask([single]).any()          # a single shot at 55000 did not clip

@@ -8,6 +8,12 @@ import numpy as np
 
 from .processing import exclusion_mask
 
+# Pixels averaged at each window edge to place a line's local baseline. With 1, a single noisy
+# edge pixel sets the baseline, and the reference window's edges tend to land on noise dips,
+# biasing ratios ~1-2% low; 2 cuts that to <0.6% and still fits the narrowest window that
+# select_lines accepts (2 pixels + apex + 2 pixels).
+EDGE_PTS = 2
+
 
 def total_area(wl: np.ndarray, corrected: np.ndarray, exclude=None) -> float:
     '''
@@ -84,7 +90,7 @@ def line_window(wl: np.ndarray, y: np.ndarray, center: float, half_width: float 
 
 
 def integrate_local_peak(wl: np.ndarray, y: np.ndarray, center: float,
-                         half_width: float | None = None, edge_pts: int = 1,
+                         half_width: float | None = None, edge_pts: int = EDGE_PTS,
                          search: float = 0.1, max_half_width: float = 0.35,
                          bounds: tuple[int, int] | None = None) -> dict:
     '''

@@ -20,7 +20,8 @@ from .processing import (exclusion_mask, global_baseline, location_spectra, per_
                          per_shot_spectrum, saturated_mask)
 from .metrics import integrate_local_peak, line_window, peak_bounds, total_area
 from .lines import select_lines
-from .analysis import TOTAL, TOTAL_EXCL, analyze_sample, areas_table, line_windows, ratio_tables
+from .analysis import (TOTAL, TOTAL_EXCL, RatioWarning, analyze_sample, areas_table, line_windows,
+                       ratio_tables, saturated_share)
 from .study import Sample, StudyResult, run_study
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     'saturated_mask',
     'integrate_local_peak', 'line_window', 'peak_bounds', 'total_area',
     'select_lines',
-    'TOTAL', 'TOTAL_EXCL', 'analyze_sample', 'areas_table', 'line_windows', 'ratio_tables',
+    'TOTAL', 'TOTAL_EXCL', 'RatioWarning', 'analyze_sample', 'areas_table', 'line_windows',
+    'ratio_tables', 'saturated_share',
     'Sample', 'StudyResult', 'run_study',
 ]

@@ -14,7 +14,7 @@ from .processing import exclusion_mask
 
 def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n: int = 4,
                  interferents: list[str] | None = None,
-                 interf_species: tuple[str, ...] = ('I',), interf_tol: float = 0.15,
+                 interf_species: tuple[str, ...] = ('I', 'II'), interf_tol: float = 0.15,
                  exclude=None, exclude_pad: float = 0.5,
                  peak_tol: float = 0.1, min_sep: float = 1.0, min_prominence: float = 2.0,
                  min_side_px: int = 2, candidates: int = 40,
@@ -29,8 +29,8 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
         db_path: NIST database (default: the libs_viewer data folder).
 
     A candidate is rejected outright if it is within `exclude_pad` nm of an excluded
-    (saturated) pixel, or within `interf_tol` nm of a strong line (of `interf_species`,
-    neutral by default) of one of `interferents`.
+    (saturated) pixel, or within `interf_tol` nm of a strong line (of `interf_species`:
+    neutral and singly ionized by default) of one of `interferents`.
 
     It is then tested in each reference spectrum, where it counts as *detected* if there is
     a peak (prominence >= min_prominence x median of that spectrum) within `peak_tol` nm,

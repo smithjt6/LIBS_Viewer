@@ -84,24 +84,30 @@ def exclusion_mask(wl: np.ndarray, exclude) -> np.ndarray:
     return mask
 
 
-def saturated_mask(files: list[LIBSFile], level: float = 64900.0, pad_px: int = 2) -> np.ndarray:
+def saturated_mask(files: list[LIBSFile], level: float = 64900.0,
+                   accumulated_level: float = 52000.0, pad_px: int = 2) -> np.ndarray:
     '''
     Pixels where the detector clipped in any stored spectrum of any of the given files.
 
-    A pixel is flagged if its per-shot intensity reaches `level` counts (the 16-bit detector
-    tops out at ~65000-65500 counts per shot), and the flag is widened by `pad_px` pixels each
-    side. Pass all temperatures of one sample together so the same pixels are excluded at
-    every temperature.
+    Single shots: flagged where the intensity reaches `level` counts (the detector clips
+    at 64,980-65,500 counts per shot, depending on the spectrometer channel).
 
-    Limitation: an accumulated spectrum is the sum of its shots, so clipping is only seen when
-    (nearly) every shot clipped; single-shot spectra show every clipped shot.
+    Accumulated spectra: the stored sum of N shots only reaches N x `level` where every shot
+    clipped; where only some did, the per-shot mean sits below `level`. So these are flagged
+    from the lower `accumulated_level` (about 80% of full scale) up: with the 15-50%
+    shot-to-shot scatter seen in LIBS, a pixel that bright on average clipped on some shots.
+
+    Each flag is widened by `pad_px` pixels on each side. Pass all temperatures of one sample
+    together so the same pixels are excluded at every temperature.
 
     Returns:
         Boolean array aligned with the wavelength axis.
     '''
     mask = np.zeros(len(files[0].wavelengths), dtype=bool)
     for f in files:
-        mask |= per_shot_columns(f).max(axis=1).to_numpy(dtype=float) >= level
+        accumulated = f.acquisitions['shots_summed'].to_numpy() > 1
+        limit = np.where(accumulated, accumulated_level, level)        # one limit per spectrum
+        mask |= (per_shot_columns(f).to_numpy(dtype=float) >= limit).any(axis=1)
     if pad_px:
         mask = np.convolve(mask, np.ones(2 * pad_px + 1), mode='same') > 0
     return mask

@@ -31,7 +31,7 @@ import pandas as pd
 
 from .. import __version__
 from ..nist.query import resolve_db
-from .analysis import TOTAL, analyze_sample, areas_table, line_windows, ratio_tables
+from .analysis import TOTAL, RatioWarning, analyze_sample, areas_table, line_windows, ratio_tables
 from .lines import select_lines
 from .loading import LayoutWarning, LIBSFile, SettingsWarning, overview_table
 from .plan import study_plan
@@ -145,7 +145,8 @@ class StudyResult:
 def run_study(folder: str | Path, elements: list[str] | None = None, baseline: str = 'snip',
               pattern: str | None = None, manifest=None, temperatures=None, ref: float = 300,
               n_lines: int = 4, min_prominence: float = 0.25, interferents: list[str] | None = None,
-              scatter: bool = True, db_path: str | Path | None = None) -> StudyResult:
+              total_row: str = TOTAL, scatter: bool = True,
+              db_path: str | Path | None = None) -> StudyResult:
     '''
     Runs a complete temperature study on a folder of Applied Spectra .tdms files.
 
@@ -161,6 +162,9 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
             (0.25 finds weak lines on a high continuum; select_lines' stricter default is 2).
         interferents: extra elements whose lines must be avoided (the other study elements
             are always included).
+        total_row: the total that R_rel divides the lines by: 'Total' or
+            'Total (excl. sat.)' (saturated pixels left out). A note is added when 'Total'
+            holds a large share of saturated light.
         scatter: also compute the location / shot scatter (slower with airpls).
         db_path: NIST database (default: the per-user database).
 
@@ -183,7 +187,7 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
 
     samples = _build_samples(plan, files, notes)
     line_tables = _pick_lines(samples, wl, ref, n_lines, min_prominence, interferents, db, notes)
-    areas, r_direct, r_rel = _measure(samples, wl, baseline, ref)
+    areas, r_direct, r_rel = _measure(samples, wl, baseline, ref, total_row, notes)
     scatter_df = _scatter(samples, wl, baseline, ref) if scatter else pd.DataFrame()
 
     settings = {'libs_viewer': __version__, 'created': datetime.now().isoformat(timespec='seconds'),
@@ -192,7 +196,7 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
                             ('DataFrame' if manifest is not None else None),
                 'temperatures': list(temperatures) if temperatures else None,
                 'elements': elements, 'baseline': baseline, 'ref': ref, 'n_lines': n_lines,
-                'min_prominence': min_prominence, 'interferents': interferents,
+                'min_prominence': min_prominence, 'interferents': interferents, 'total_row': total_row,
                 'key_settings': list(KEY_SETTINGS), 'nist_db': str(db)}
     return StudyResult(settings=settings, plan=plan, overview=overview_table(files),
                        line_tables=line_tables, areas=areas, r_direct=r_direct, r_rel=r_rel,
@@ -312,11 +316,19 @@ def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, in
 
 
 # ------------------------------------------------------------------ 5. areas and ratios
-def _measure(samples: dict[str, Sample], wl, baseline, ref):
+def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row, notes: list[str]):
+    '''analyze_sample + ratio_tables per sample; ratio warnings go into `notes`.'''
     areas, r_direct, r_rel = {}, {}, {}
     for s in samples.values():
         s.areas = analyze_sample(wl, s.spectra, s.lines, method=baseline, exclude=s.mask, ref=ref)
-        r = ratio_tables(s.areas, ref=ref)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', RatioWarning)
+            r = ratio_tables(s.areas, ref=ref, total_row=total_row)
+        for w in caught:
+            if issubclass(w.category, RatioWarning):
+                notes.append(f'{s.name}: {w.message}')
+            else:
+                warnings.warn(w.message, w.category, stacklevel=2)
         areas[s.name], r_direct[s.name], r_rel[s.name] = s.areas, r['R_direct'], r['R_rel']
 
     def stack(d):
@@ -339,8 +351,11 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref) -> pd.DataFrame:
     Each for the lines (mean over the sample's lines) and for the Total area.
     '''
     rows = {}
+
     for s in samples.values():
+
         lines = list(s.lines)
+        
         for t, f in s.files.items():
             windows = line_windows(wl, s.spectra[ref], s.lines)
             row = {}

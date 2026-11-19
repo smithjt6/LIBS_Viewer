@@ -1,8 +1,12 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from libs_viewer.libs import (LIBSFile, TOTAL, TOTAL_EXCL, analyze_sample, areas_table,
+from libs_viewer.libs.metrics import EDGE_PTS
+from libs_viewer.libs import (LIBSFile, TOTAL, TOTAL_EXCL, RatioWarning, saturated_share,
+                              analyze_sample, areas_table,
                               integrate_local_peak, line_window, line_windows, location_spectra,
                               peak_bounds,
                               ratio_tables, total_area)
@@ -95,6 +99,43 @@ def test_analyze_sample_and_ratio_tables(temperature_series):
         assert rel.loc['A 390.00', t] == pytest.approx(direct.loc['A 390.00', t] / direct.loc[TOTAL, t])
         assert rel.loc['A 390.00', t] < 1.0
     pd.testing.assert_series_equal(rel.loc[TOTAL], direct.loc[TOTAL])
+
+
+def _areas(line_ref, total=(100.0, 120.0), total_excl=(100.0, 120.0)):
+    return pd.DataFrame({300: [line_ref, total[0], total_excl[0]], 400: [5.0, total[1], total_excl[1]]},
+                        index=['L', TOTAL, TOTAL_EXCL])
+
+
+def test_ratio_tables_warns_when_total_is_saturated():
+    areas = _areas(10.0, total=(100.0, 120.0), total_excl=(60.0, 90.0))   # 40% saturated at 300
+    np.testing.assert_allclose(saturated_share(areas), [0.4, 0.25])
+    with pytest.warns(RatioWarning, match='40% of the Total light'):
+        ratio_tables(areas, ref=300)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        r = ratio_tables(areas, ref=300, total_row=TOTAL_EXCL)               # no warning
+    assert r['R_rel'].loc['L', 400] == pytest.approx((5 / 90) / (10 / 60))
+    with pytest.raises(ValueError, match='total_row'):
+        ratio_tables(areas, ref=300, total_row='L')
+
+
+def test_ratio_tables_nonpositive_reference_gives_nan():
+    for bad in (0.0, -1.0):
+        with pytest.warns(RatioWarning, match="zero, negative or missing for \\['L'\\]"):
+            r = ratio_tables(_areas(bad), ref=300)
+        assert np.isnan(r['R_direct'].loc['L', 400]) and np.isnan(r['R_rel'].loc['L', 400])
+        assert r['R_direct'].loc[TOTAL, 400] == pytest.approx(1.2)
+
+
+def test_edge_pts_default_reduces_reference_window_bias():
+    '''Windows found on a noisy reference spectrum must not bias ratios (edge_pts=1 gave ~2% low).'''
+    rng = np.random.default_rng(1)
+    y = synth_spectrum({'B 400.00': 100.0})
+    r = [ratio_tables(analyze_sample(WL, {300: y + rng.normal(0, 5, len(y)), 400: y + rng.normal(0, 5, len(y))},
+                                     {'B 400.00': 400.0}), ref=300)['R_direct'].loc['B 400.00', 400]
+         for _ in range(100)]
+    assert EDGE_PTS == 2
+    assert np.mean(r) == pytest.approx(1.0, abs=0.01)
 
 
 def test_windows_come_from_reference_temperature(temperature_series):
