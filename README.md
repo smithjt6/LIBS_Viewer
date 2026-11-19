@@ -76,7 +76,7 @@ neither is given (or both are), they raise an error instead of falling back to g
 
 | Mode | Input | Use when |
 |---|---|---|
-| **Manifest** (`manifest=`) | CSV or DataFrame, one row per file: `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (stored-spectrum names such as `Grid Location # 1-1`, separated by `;`, empty = choose automatically) | Names are inconsistent, or you want the grouping written down next to the data |
+| **Manifest** (`manifest=`) | CSV or DataFrame, one row per file: `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (stored-spectrum names such as `Grid Location # 1-1`, separated by `;`, empty = choose automatically). Example: [examples/end_to_end_manifest.csv](examples/end_to_end_manifest.csv) | Names are inconsistent, or you want the grouping written down next to the data |
 | **Pattern** (`pattern=`) | Template matched against every `.tdms` path under the folder: `{element}` and `{temperature}` required, `{sample}` optional, `*` = any text within one folder or file name, e.g. `{element}/{sample}/*{temperature}*`. Pass `temperatures=[300, 350, 400]` when a temperature is glued to other digits (`Ce1400.tdms`) | Names follow a fixed convention |
 
 Rules for both modes:
@@ -245,7 +245,8 @@ src/libs_viewer/
   mcp/                  (planned) MCP server over core/tools.py (tiers 0-2 only)
   cli.py                `libs-viewer paths | nist build | nist status`
 tests/                  pytest; synthetic .tdms files, real NIST pages in tests/fixtures/nist
-examples/               notebooks: quick_study, loading_data, end_to_end_temp_study (data/ is not in git)
+examples/               notebooks: quick_study, loading_data, end_to_end_temp_study (data/ is not in git);
+                        end_to_end_manifest.csv, an example manifest for data/end_to_end
 ```
 
 ---
