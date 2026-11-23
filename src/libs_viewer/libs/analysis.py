@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .metrics import EDGE_PTS, integrate_local_peak, line_window, total_area
-from .processing import exclusion_mask, global_baseline
+from .processing import baseline_settings, exclusion_mask, global_baseline
 
 # Row names for the two total-area rows in every areas table
 TOTAL = 'Total'                    # area of the whole background-free spectrum
@@ -65,7 +65,7 @@ def line_windows(wl: np.ndarray, y_ref: np.ndarray, lines: dict[str, float],
 
 
 def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[str, tuple[int, int]],
-                method: str = 'snip', max_half_window: int = 40, lam: float = 1e6,
+                method: str = 'snip', baseline_params: dict | None = None,
                 edge_pts: int = EDGE_PTS, exclude=None) -> pd.DataFrame:
     '''
     Measure every line and the total area in several spectra. One column per spectrum.
@@ -86,8 +86,9 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
             - a list of (name, spectrum) pairs
         lines: {label: wavelength in nm}.
         windows: {label: (left, right)} pixel windows from `line_windows`.
-        method, max_half_window, lam: background settings, passed to
-            `processing.global_baseline`.
+        method, baseline_params: the background method (a name in `processing.BASELINES`)
+            and its parameters, e.g. {'max_half_window': 60}; left-out ones take their
+            defaults. Passed to `processing.global_baseline`.
         edge_pts: pixels at each window edge used for the local line baseline.
         exclude: pixels to leave out of 'Total (excl. sat.)'. Either a boolean array the
             length of `wl` (e.g. `processing.saturated_mask`) or a list of (lo, hi) nm
@@ -103,6 +104,7 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
     '''
 
     pairs = spectra.items() if isinstance(spectra, (dict, pd.DataFrame)) else spectra
+    params = baseline_settings(method, baseline_params)  # fail before measuring anything
     excluded = exclusion_mask(wl, exclude)  # build the mask once, not once per spectrum
 
     # a line window over excluded (saturated) pixels measures the detector's ceiling, not the line
@@ -118,7 +120,7 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
         y = np.asarray(y, dtype=float)
         column = {label: integrate_local_peak(wl, y, center, edge_pts=edge_pts, bounds=windows[label])['area']
                   for label, center in lines.items()}
-        corrected, _ = global_baseline(wl, y, method, max_half_window, lam)
+        corrected, _ = global_baseline(wl, y, method, **params)
         column[TOTAL] = total_area(wl, corrected)
         column[TOTAL_EXCL] = total_area(wl, corrected, excluded)
         columns[name] = column
@@ -126,9 +128,9 @@ def areas_table(wl: np.ndarray, spectra, lines: dict[str, float], windows: dict[
     return pd.DataFrame(columns, index=[*lines, TOTAL, TOTAL_EXCL])
 
 def analyze_sample(wl: np.ndarray, spectra_by_temp: dict[float, np.ndarray],
-                   lines: dict[str, float], method: str = 'snip', max_half_window: int = 40,
-                   lam: float = 1e6, half_width: float | None = None, edge_pts: int = EDGE_PTS,
-                   exclude=None, ref: float = 300) -> pd.DataFrame:
+                   lines: dict[str, float], method: str = 'snip',
+                   baseline_params: dict | None = None, half_width: float | None = None,
+                   edge_pts: int = EDGE_PTS, exclude=None, ref: float = 300) -> pd.DataFrame:
     '''
     Line areas and total areas of one sample at every temperature.
 
@@ -145,7 +147,7 @@ def analyze_sample(wl: np.ndarray, spectra_by_temp: dict[float, np.ndarray],
             (lo, hi) nm ranges).
         ref: the temperature whose spectrum sets the line windows. Must be a key of
             `spectra_by_temp`.
-        method, max_half_window, lam, edge_pts: passed on to `areas_table`.
+        method, baseline_params, edge_pts: passed on to `areas_table`.
 
     Returns:
         DataFrame. Rows: one per line, then 'Total' and 'Total (excl. sat.)'.
@@ -161,7 +163,7 @@ def analyze_sample(wl: np.ndarray, spectra_by_temp: dict[float, np.ndarray],
     windows = line_windows(wl, spectra_by_temp[ref], lines, half_width, edge_pts)
     by_temp = {t: spectra_by_temp[t] for t in sorted(spectra_by_temp)}
 
-    df = areas_table(wl, by_temp, lines, windows, method, max_half_window, lam, edge_pts, exclude)
+    df = areas_table(wl, by_temp, lines, windows, method, baseline_params, edge_pts, exclude)
 
     df.columns.name = 'Temperature (C)'
 

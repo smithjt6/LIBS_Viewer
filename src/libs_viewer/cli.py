@@ -16,11 +16,28 @@ from .core import paths
 from .nist import build, query
 
 
+def _key_values(items: list[str] | None) -> dict[str, float] | None:
+    '''["max_half_window=60", "lam=1e7"] -> {"max_half_window": 60.0, "lam": 1e7}.'''
+    if not items:
+        return None
+    out = {}
+    for item in items:
+        name, sep, value = item.partition('=')
+        try:
+            out[name.strip()] = float(value)
+        except ValueError:
+            sep = ''
+        if not sep or not name.strip():
+            raise ValueError(f'--baseline-param needs NAME=NUMBER, got {item!r}')
+    return out
+
+
 def _cmd_analyze(args):
     from .libs.study import run_study       # keeps `libs-viewer paths` fast
     from .nist.query import NISTDatabaseMissing
     try:
         result = run_study(args.folder, elements=args.elements, baseline=args.baseline,
+                           baseline_params=_key_values(args.baseline_param),
                            pattern=args.pattern, manifest=args.manifest,
                            temperatures=args.temperatures, ref=args.ref, n_lines=args.lines,
                            min_prominence=args.min_prominence, interferents=args.interferents,
@@ -64,9 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument('folder', help='study folder')
     how = a.add_mutually_exclusive_group(required=True)
     how.add_argument('--pattern', help='file-name template, e.g. "{element}/{sample}/*{temperature}*"')
-    how.add_argument('--manifest', help='CSV with columns file, element, sample, temperature[, use_columns]')
+    how.add_argument('--manifest', help='CSV or XLSX with columns file, element, sample, temperature[, use_columns]')
     a.add_argument('--elements', nargs='+', help='elements to analyse (default: all in the study)')
-    a.add_argument('--baseline', choices=['snip', 'airpls'], default='snip', help='baseline method (default snip)')
+    a.add_argument('--baseline', default='snip', help='baseline method: snip (default) or airpls')
+    a.add_argument('--baseline-param', action='append', metavar='NAME=VALUE',
+                   help='baseline setting, repeatable, e.g. max_half_window=60 (SNIP) or lam=1e7 (airPLS)')
     a.add_argument('--temperatures', nargs='+', type=float, help='temperatures used, e.g. 300 350 400')
     a.add_argument('--ref', type=float, default=300, help='reference temperature (default 300)')
     a.add_argument('--lines', type=int, default=4, help='lines per element (default 4)')

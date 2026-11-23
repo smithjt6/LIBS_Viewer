@@ -1,10 +1,12 @@
 '''
-Numbers measured on one spectrum: total area, line windows, line areas.
+Numbers measured on one spectrum: peaks, total area, line windows, line areas.
 
-All functions take arrays and return numbers / arrays; no plotting, no file I/O.
+All functions take arrays and return numbers / arrays / DataFrames; no plotting, no file I/O.
 '''
 
 import numpy as np
+import pandas as pd
+from scipy.signal import find_peaks
 
 from .processing import exclusion_mask
 
@@ -13,6 +15,44 @@ from .processing import exclusion_mask
 # biasing ratios ~1-2% low; 2 cuts that to <0.6% and still fits the narrowest window that
 # select_lines accepts (2 pixels + apex + 2 pixels).
 EDGE_PTS = 2
+
+
+def detect_peaks(wl: np.ndarray, y: np.ndarray, min_prominence: float = 1.0,
+                 exclude=None) -> pd.DataFrame:
+    '''
+    The peaks of one spectrum: every local maximum that stands out from its surroundings by
+    at least `min_prominence` x the spectrum's median. On a raw (not continuum-corrected)
+    per-shot spectrum the median is about the continuum level, so 1 finds the clear lines,
+    0.25 also weak lines on a high continuum. This is the peak test used by `select_lines`
+    and the peak labels of `plotting.plot_spectrum`.
+
+    Args:
+        wl, y: wavelength axis (nm) and intensity.
+        min_prominence: threshold, as a multiple of the median of `y`.
+        exclude: pixels to flag, e.g. `processing.saturated_mask`, or (lo, hi) nm ranges.
+            Peaks there are kept but marked, since their apex is the detector's ceiling.
+
+    Returns:
+        DataFrame, one row per peak, sorted by wavelength:
+            wavelength_nm, intensity   at the apex
+            prominence                 height above the higher of the two flanking valleys
+            pixel                      index of the apex in `wl`
+            excluded                   True if the apex is an excluded pixel
+
+    Raises:
+        ValueError: the median of `y` is not positive (e.g. a continuum-corrected spectrum),
+            so a relative threshold means nothing.
+    '''
+    wl = np.asarray(wl, dtype=float)
+    y = np.asarray(y, dtype=float)
+    median = float(np.median(y))
+    if not median > 0:
+        raise ValueError(f'the median intensity is {median:g}; detect_peaks needs a spectrum '
+                         'with a positive continuum (use the raw, not the corrected, spectrum)')
+    idx, props = find_peaks(y, prominence=min_prominence * median)
+    return pd.DataFrame({'wavelength_nm': wl[idx], 'intensity': y[idx],
+                         'prominence': props['prominences'], 'pixel': idx,
+                         'excluded': exclusion_mask(wl, exclude)[idx]})
 
 
 def total_area(wl: np.ndarray, corrected: np.ndarray, exclude=None) -> float:

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from libs_viewer.libs.metrics import EDGE_PTS
+from libs_viewer.libs.metrics import EDGE_PTS, detect_peaks
 from libs_viewer.libs import (LIBSFile, TOTAL, TOTAL_EXCL, RatioWarning, saturated_share,
                               analyze_sample, areas_table,
                               integrate_local_peak, line_window, line_windows, location_spectra,
@@ -166,3 +166,18 @@ def test_areas_table_one_column_per_location(tdms_file):
     # columns were scaled 0.99 / 1.00 / 1.01
     np.testing.assert_allclose(table.loc['B 400.00'] / table.loc['B 400.00', 2],
                                [0.99, 1.0, 1.01], rtol=1e-9)
+
+
+def test_detect_peaks_threshold_and_exclusion():
+    y = synth_spectrum({'A 390.00': 200.0, 'B 400.00': 100.0, 'C 410.00': 30.0})
+    p = detect_peaks(WL, y)                                    # 1 x median: the two clear lines
+    assert list(p.columns) == ['wavelength_nm', 'intensity', 'prominence', 'pixel', 'excluded']
+    assert p.wavelength_nm.tolist() == pytest.approx([390.0, 400.0])
+    assert (WL[p.pixel] == p.wavelength_nm).all() and not p.excluded.any()
+    weak = detect_peaks(WL, y, min_prominence=0.25)            # also the weak line on the continuum
+    assert weak.wavelength_nm.tolist() == pytest.approx([390.0, 400.0, 410.0])
+    assert weak.prominence.is_monotonic_decreasing             # areas 200 > 100 > 30
+    flagged = detect_peaks(WL, y, exclude=[(399.5, 400.5)])
+    assert flagged.excluded.tolist() == [False, True]          # kept, but marked
+    with pytest.raises(ValueError, match='median'):
+        detect_peaks(WL, y - np.median(y) - 1)                 # e.g. a corrected spectrum

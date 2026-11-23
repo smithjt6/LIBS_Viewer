@@ -3,7 +3,9 @@ NIST database: builder (run offline on real Handbook pages in tests/fixtures/nis
 read-only queries, paths and CLI.
 '''
 
+import shutil
 import sqlite3
+from contextlib import closing
 
 import numpy as np
 import pytest
@@ -111,3 +113,31 @@ def test_cli_status(nist_db, tmp_path, capsys):
     assert cli.main(['nist', 'status', '--db', str(nist_db)]) == 0
     assert 'strong_lines' in capsys.readouterr().out
     assert cli.main(['nist', 'status', '--db', str(tmp_path / 'none.sqlite')]) == 1
+
+
+def test_elements_in_atomic_number_order(nist_db):
+    assert query.elements(nist_db) == ['Ce', 'Gd']
+
+
+def test_lines_near(nist_db):
+    df = query.lines_near([394.27, 394.0], tol=0.02, db_path=nist_db)
+    assert list(df.columns) == ['peak_nm', 'element', 'species', 'wavelength_nm', 'intensity', 'delta_nm']
+    at = df[df.peak_nm == 394.27]
+    assert at.species.tolist() == ['Ce II', 'Gd I']            # Ce II 394.2746 is closer than Gd I 394.263
+    assert at.delta_nm.abs().is_monotonic_increasing and (df.delta_nm.abs() <= 0.02).all()
+    assert 394.0 not in set(df.peak_nm)                         # nothing within 0.02 nm: no rows
+    assert query.lines_near(394.27, tol=0.02, elements=['Gd'], db_path=nist_db).species.tolist() == ['Gd I']
+    assert query.lines_near(394.27, tol=0.02, species=('II',), db_path=nist_db).species.tolist() == ['Ce II']
+    assert query.lines_near([], db_path=nist_db).empty
+
+
+def test_queries_return_air_wavelengths(nist_db, tmp_path):
+    '''Below 200 nm the Handbook lists vacuum wavelengths; the spectrometer measures in air.'''
+    db = tmp_path / 'vac.sqlite'
+    shutil.copy(nist_db, db)
+    with closing(sqlite3.connect(db)) as con, con:
+        con.execute("INSERT INTO strong_lines (element, species, wavelength_A, medium, wavelength_air_A, "
+                    "intensity) VALUES ('Ce', 'Ce II', 1930.905, 'vacuum', 1930.27, 999)")
+    assert query.strong_lines('Ce', wl_range=(186, 200), db_path=db).wavelength_nm.tolist()         == pytest.approx([193.027])
+    assert query.lines_near(193.03, tol=0.01, db_path=db).wavelength_nm.tolist() == pytest.approx([193.027])
+    assert query.lines_near(193.09, tol=0.01, db_path=db).empty    # the vacuum value is not matched

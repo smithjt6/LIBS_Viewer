@@ -37,6 +37,8 @@ import numpy as np
 import pandas as pd
 from nptdms import TdmsFile
 
+from .plan import MANIFEST_SUFFIXES, read_manifest
+
 # ---------------------------------------------------------------- file format constants
 # Change these if your files use a different layout.
 
@@ -534,34 +536,58 @@ def _warn_mixed_accumulations(file_name: str, layout: pd.DataFrame) -> None:
 # ---------------------------------------------------------------- many files
 class LoadLIBSData(Mapping[str, LIBSFile]):
     '''
-    Load one .tdms file, or every .tdms file in a folder, and use it like a dict.
+    Load .tdms files and use them like a dict. Three ways in:
+
+        LoadLIBSData('data/Ce/run1.tdms')                 one file
+        LoadLIBSData('data/Ce', recursive=True)           every .tdms file in a folder
+        LoadLIBSData(manifest='data/Ce/manifest.xlsx')    exactly the files a manifest lists
 
     Args:
-        path: a .tdms file or a folder.
-        recursive: if True, also look in subfolders.
+        path: a .tdms file or a folder. With a manifest: the folder its file paths are
+            relative to (default: the manifest's own folder).
+        recursive: if True, also look in subfolders (folder loading only).
+        manifest: a .csv / .xlsx file or DataFrame with a `file` column and any label columns
+            (sample, temperature, ...). See `read_manifest`; only `file` is required here.
 
     The keys are file paths relative to the folder, e.g. 'Ce/s1/Ce_s1_300C.tdms'. You
     can also index by position: data[0] is the first file.
-    A file that can't be read is skipped with a warning, so one bad file doesn't stop
-    the rest from loading.
+
+    Folder loading skips a file that can't be read, with a warning, so one bad file doesn't
+    stop the rest. A manifest names its files on purpose, so there any unreadable file is an
+    error (all of them are listed at once). The manifest's labels are kept in `labels`
+    (one row per file, indexed like the keys) and shown first in `overview()`.
 
     Raises:
-        FileNotFoundError: `path` does not exist.
+        FileNotFoundError: `path`, the manifest, or a listed file does not exist.
+        ValueError: `path` is a file but not a .tdms file (e.g. a manifest passed as `path`),
+            neither `path` nor `manifest` is given, the manifest is invalid, or a listed
+            file can't be read.
 
     Example:
         data = LoadLIBSData('data/Ce', recursive=True)
         data.overview()                  # one summary row per file
         f = data['s1/Ce_s1_300C.tdms']   # a LIBSFile
     '''
-    def __init__(self, path: str | Path, recursive: bool = False):
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None, recursive: bool = False, manifest=None):
+        self.path = None if path is None else Path(path)
         self.recursive = recursive
+        self.manifest = manifest
+        self.labels: pd.DataFrame | None = None
         self.data: dict[str, LIBSFile] = {}
-        self._load()
+        if manifest is not None:
+            self._load_manifest()
+        elif self.path is None:
+            raise ValueError('give a .tdms file or folder as path=, or a manifest=')
+        else:
+            self._load()
 
     def _load(self) -> None:
         '''Find the .tdms files under `path` and read each one into `self.data`.'''
         if self.path.is_file():
+            if self.path.suffix.lower() != '.tdms':
+                hint = (f"; to load the files it lists, use LoadLIBSData(manifest={str(self.path)!r})"
+                        if self.path.suffix.lower() in MANIFEST_SUFFIXES else '')
+                raise ValueError(f'{self.path.name} is not a .tdms file{hint}')
             files, root = [self.path], self.path.parent
         elif self.path.is_dir():
             pattern = self.path.rglob("*") if self.recursive else self.path.glob("*")
@@ -576,9 +602,32 @@ class LoadLIBSData(Mapping[str, LIBSFile]):
             except Exception as e:
                 _warn(f.name, f"Could not read {f}: {e}", UserWarning, stacklevel=3)
 
+    def _load_manifest(self) -> None:
+        '''Read exactly the files the manifest lists; any that can't be read is an error.'''
+        table = read_manifest(self.manifest, self.path)
+        root = self.path if self.path is not None else Path(self.manifest).parent
+        failed = []
+        for key in table['file']:
+            try:
+                self.data[key] = LIBSFile.from_tdms(root / key)
+            except Exception as e:
+                failed.append(f'{key}: {e}')
+        if failed:
+            raise ValueError(f'{len(failed)} manifest file(s) could not be read:\n' + '\n'.join(failed))
+        self.labels = table.set_index('file')
+
     def overview(self) -> pd.DataFrame:
-        '''A summary table with one row per loaded file. See `overview_table`.'''
-        return overview_table(self.data)
+        '''
+        A summary table with one row per loaded file. See `overview_table`. With a manifest,
+        its label columns come first (a `use_columns` list is shown as ';'-separated text).
+        '''
+        table = overview_table(self.data)
+        if self.labels is None:
+            return table
+        labels = self.labels.copy()
+        if 'use_columns' in labels:
+            labels['use_columns'] = ['; '.join(v) if v else '' for v in labels['use_columns']]
+        return labels.join(table)
 
     def __getitem__(self, key: str | int) -> LIBSFile:
         '''data['file.tdms'] gets a file by name; data[0] gets the first file.'''
@@ -598,7 +647,8 @@ def overview_table(files: dict[str, LIBSFile]) -> pd.DataFrame:
     Columns:
         locations           how many spots were measured
         spectra             how many spectra are stored
-        shots per location  e.g. 10, or '10, 10, 5' if the locations differ
+        shots per location  text: '10', or '10, 10, 5' if the locations differ (always a
+                            string, so the column has one type and displays in Streamlit / Arrow)
         stored as           'accumulated', 'single shots' or 'mixed'
         energy (mJ)         laser energy (NaN if the file doesn't record it)
         gate delay (us)     gate delay (NaN if the file doesn't record it)
@@ -609,7 +659,7 @@ def overview_table(files: dict[str, LIBSFile]) -> pd.DataFrame:
         shots = f.shots_per_location()
         rows[key] = {'locations': f.n_locations,
                      'spectra': f.spectra.shape[1],
-                     'shots per location': (int(shots.iloc[0]) if shots.nunique() == 1
+                     'shots per location': (f'{shots.iloc[0]:g}' if shots.nunique() == 1
                                             else ', '.join(f'{s:g}' for s in shots)),
                      'stored as': f.storage,
                      'energy (mJ)': f.params.get('Energy', np.nan),

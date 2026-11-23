@@ -169,7 +169,7 @@ def test_overview_one_row_per_file(tmp_path):
     with pytest.warns(UserWarning):
         table = LoadLIBSData(tmp_path).overview()
     assert list(table.index) == ['a.tdms', 'b.tdms']
-    assert table.loc['a.tdms', 'shots per location'] == 5 and table.loc['a.tdms', 'stored as'] == 'accumulated'
+    assert table.loc['a.tdms', 'shots per location'] == '5' and table.loc['a.tdms', 'stored as'] == 'accumulated'
     assert table.loc['b.tdms', 'stored as'] == 'single shots'
     assert table.loc['a.tdms', 'locations'] == 3 and table.loc['a.tdms', 'spectra'] == 3
     assert table.loc['a.tdms', 'gate delay (us)'] == 3.5
@@ -219,6 +219,72 @@ def test_load_skips_unreadable_with_warning(tmp_path):
 def test_missing_path_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         LoadLIBSData(tmp_path / 'nope')
+
+
+# ------------------------------------------------------------------ manifests
+@pytest.fixture
+def labelled(tmp_path):
+    """Two .tdms files in a sub-folder, an unlisted third one, and the folder they sit in."""
+    y = synth_spectrum({})
+    write_tdms(tmp_path / 's1' / 'a.tdms', y)
+    write_tdms(tmp_path / 's1' / 'b.tdms', y)
+    write_tdms(tmp_path / 'unlisted.tdms', y)
+    return tmp_path
+
+
+@pytest.mark.parametrize('suffix', ['.csv', '.xlsx'])
+def test_load_manifest_only_listed_files_with_labels(labelled, suffix):
+    # headers in any case / spacing; only 'file' is required; extra label columns kept
+    table = pd.DataFrame({' File ': ['s1/b.tdms', 's1/a.tdms'], 'Sample': ['one', 'one'],
+                          'operator': ['JS', 'AB']})
+    path = labelled / f'manifest{suffix}'
+    table.to_csv(path, index=False) if suffix == '.csv' else table.to_excel(path, index=False)
+
+    data = LoadLIBSData(manifest=path)                     # folder defaults to the manifest's
+    assert list(data) == ['s1/b.tdms', 's1/a.tdms']        # manifest order, unlisted file left out
+    assert data.labels.loc['s1/a.tdms', 'operator'] == 'AB'
+    overview = data.overview()
+    assert list(overview.columns[:2]) == ['sample', 'operator']
+    assert overview.loc['s1/b.tdms', 'locations'] == 3
+
+
+def test_load_manifest_dataframe_needs_folder(labelled):
+    table = pd.DataFrame({'file': ['s1/a.tdms'], 'use_columns': ['Location 1; Location 2']})
+    with pytest.raises(ValueError, match='folder'):
+        LoadLIBSData(manifest=table)
+    data = LoadLIBSData(labelled, manifest=table)
+    assert data.labels.loc['s1/a.tdms', 'use_columns'] == ['Location 1', 'Location 2']
+    assert data.overview().loc['s1/a.tdms', 'use_columns'] == 'Location 1; Location 2'
+
+
+@pytest.mark.parametrize('table, error, match', [
+    ({'path': ['s1/a.tdms']}, ValueError, "'file' column"),
+    ({'file': ['s1/a.tdms', 's1/a.tdms']}, ValueError, 'more than once'),
+    ({'file': ['s1/a.tdms', None], 'sample': ['x', 'y']}, ValueError, r'without a file: \[3\]'),
+    ({'file': ['notes.txt']}, ValueError, 'not .tdms'),
+    ({'file': ['s1/a.tdms', 's1/missing.tdms']}, FileNotFoundError, 'missing.tdms'),
+])
+def test_load_manifest_rejects_bad_tables(labelled, table, error, match):
+    with pytest.raises(error, match=match):
+        LoadLIBSData(labelled, manifest=pd.DataFrame(table))
+
+
+def test_load_manifest_unreadable_file_raises_listing_all(labelled):
+    (labelled / 'bad1.tdms').write_bytes(b'not a tdms file')
+    (labelled / 'bad2.tdms').write_bytes(b'not a tdms file')
+    table = pd.DataFrame({'file': ['s1/a.tdms', 'bad1.tdms', 'bad2.tdms']})
+    with pytest.raises(ValueError, match='2 manifest file') as e:
+        LoadLIBSData(labelled, manifest=table)
+    assert 'bad1.tdms' in str(e.value) and 'bad2.tdms' in str(e.value)
+
+
+def test_non_tdms_path_raises_and_points_to_manifest(labelled):
+    csv = labelled / 'manifest.csv'
+    pd.DataFrame({'file': ['s1/a.tdms']}).to_csv(csv, index=False)
+    with pytest.raises(ValueError, match='manifest='):
+        LoadLIBSData(csv)
+    with pytest.raises(ValueError):
+        LoadLIBSData()
 
 
 @pytest.mark.parametrize('name, temp', [

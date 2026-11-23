@@ -76,7 +76,7 @@ neither is given (or both are), they raise an error instead of falling back to g
 
 | Mode | Input | Use when |
 |---|---|---|
-| **Manifest** (`manifest=`) | CSV or DataFrame, one row per file: `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (stored-spectrum names such as `Grid Location # 1-1`, separated by `;`, empty = choose automatically). Example: [examples/end_to_end_manifest.csv](examples/end_to_end_manifest.csv) | Names are inconsistent, or you want the grouping written down next to the data |
+| **Manifest** (`manifest=`) | CSV, XLSX (first sheet) or DataFrame, one row per file (header case and spacing don't matter): `file` (relative to the folder), `element`, `sample`, `temperature`, optional `use_columns` (stored-spectrum names such as `Grid Location # 1-1`, separated by `;`, empty = choose automatically). Example: [examples/end_to_end_manifest.csv](examples/end_to_end_manifest.csv) | Names are inconsistent, or you want the grouping written down next to the data |
 | **Pattern** (`pattern=`) | Template matched against every `.tdms` path under the folder: `{element}` and `{temperature}` required, `{sample}` optional, `*` = any text within one folder or file name, e.g. `{element}/{sample}/*{temperature}*`. Pass `temperatures=[300, 350, 400]` when a temperature is glued to other digits (`Ce1400.tdms`) | Names follow a fixed convention |
 
 Rules for both modes:
@@ -93,8 +93,15 @@ Rules for both modes:
   Samples whose temperatures were acquired differently (accumulated vs single shots, number of
   locations) are also listed: their per-shot averages compare, their scatter values don't.
 
-Low-level loading of single files (`LIBSFile.from_tdms`) stays available for inspection and
-doesn't need a manifest.
+Loading for inspection doesn't need the study columns. `LoadLIBSData` loads one `.tdms` file,
+a folder (optionally `recursive=True`), or `manifest=`: the same CSV / XLSX, of which only
+`file` is required. Every other column (sample, temperature, operator, notes, ...) is kept as a
+label in `.labels` and shown first in `.overview()`. Both kinds of loading read manifests
+through the one `read_manifest`, so a manifest that loads for inspection fails a study only on
+the study's own requirements (e.g. "temperature missing for file(s) ..."). In manifest mode a
+listed file that is missing or unreadable is an error; folder loading skips unreadable files
+with a warning. Passing a manifest (or any non-`.tdms` file) as `path` is an error that points
+to `manifest=`. `LIBSFile.from_tdms` reads a single file directly.
 
 ### Tool access tiers
 
@@ -140,21 +147,23 @@ Everything below except plotting is importable from `libs_viewer.libs`
 
 | Area | Function / class | Module | Notes |
 |---|---|---|---|
-| Load a file or folder | `LoadLIBSData(path, recursive=False)`, `.overview()` | [loading.py](src/libs_viewer/libs/loading.py) | Dict-like `{relative path: LIBSFile}`; `overview()` = one row of key settings per file; unreadable files are skipped with a warning (will become strict, see [Loading contract](#loading-contract)) |
+| Load a file, folder or manifest | `LoadLIBSData(path, recursive=False, manifest=None)`, `.overview()`, `.labels` | [loading.py](src/libs_viewer/libs/loading.py) | Dict-like `{relative path: LIBSFile}`; `overview()` = manifest labels + one row of key settings per file; folder mode skips unreadable files with a warning, manifest mode raises (see [Loading contract](#loading-contract)) |
 | One file | `LIBSFile` (`spectra`, `acquisitions`, `params`, `positions`, `wavelengths`, `n_locations`, `storage`, `shots_per_location()`, `describe()`, `subset(columns=, locations=)`, `accumulate()`, `param_table()`, `varying_params()`) | [loading.py](src/libs_viewer/libs/loading.py) | `acquisitions` = one row per stored spectrum: `location`, `shot`, `shots_summed`, X/Y/Z and every instrument parameter. Locations come from the channel names (checked against the stage position, else grouped by position). `accumulate()` sums each location's spectra into one (as if Accumulate = 1). `SettingsWarning` when settings differ between stored spectra; `LayoutWarning` when one location's spectra sit at different positions, two locations share a position, a location holds repeated accumulated spectra, or `accumulate()` has nothing to do (`run_study` puts layout warnings in `notes`) |
 | File names | `temperature_from_name` | [plan.py](src/libs_viewer/libs/plan.py) | `..._300C.tdms`, `..._300_3.5delay.tdms` |
-| Which file is which | `study_plan(folder, pattern=... \| manifest=..., temperatures=None)` | [plan.py](src/libs_viewer/libs/plan.py) | Pattern placeholders `{element}` `{sample}` `{temperature}` `*`; manifest CSV `file, element, sample, temperature[, use_columns]`; raises if neither, on unmatched files, duplicates or ambiguous temperatures |
-| Whole study in one call | `run_study(folder, elements, baseline, pattern \| manifest, ...)` → `StudyResult`; CLI `libs-viewer analyze` | [study.py](src/libs_viewer/libs/study.py) | Plan → drop stored spectra with other gate/energy → per-shot spectra + saturation → NIST lines → areas, R_direct, R_rel, location and shot scatter. `notes` lists every automatic decision; `save()` writes CSVs + `settings.json` (provenance) + `summary.txt` |
+| Read a manifest | `read_manifest(manifest, folder=None)` | [plan.py](src/libs_viewer/libs/plan.py) | CSV / XLSX / DataFrame → table with `file` + label columns; only `file` required; raises on missing / duplicate / non-`.tdms` files |
+| Which file is which | `study_plan(folder, pattern=... \| manifest=..., temperatures=None)` | [plan.py](src/libs_viewer/libs/plan.py) | Pattern placeholders `{element}` `{sample}` `{temperature}` `*`; manifest CSV / XLSX `file, element, sample, temperature[, use_columns]`; raises if neither, on unmatched files, duplicates or ambiguous temperatures |
+| Whole study in one call | `run_study(folder, elements, baseline, baseline_params, pattern \| manifest, ...)` → `StudyResult`; CLI `libs-viewer analyze` | [study.py](src/libs_viewer/libs/study.py) | Plan → drop stored spectra with other gate/energy → per-shot spectra + saturation → NIST lines → areas, R_direct, R_rel, location and shot scatter. `notes` lists every automatic decision; `save()` writes CSVs + `settings.json` (provenance) + `summary.txt` |
 | Baseline check / study figure | `plot_baseline`, `plot_study` | [plotting.py](src/libs_viewer/libs/plotting.py) | Spectrum with fitted continuum + corrected spectrum; R_rel / R_total vs temperature per sample |
 | Shot scaling | `per_shot_spectrum`, `per_shot_columns`, `location_spectra` | [processing.py](src/libs_viewer/libs/processing.py) | All counts ÷ all shots (every shot weighs the same, accumulated or not); per stored spectrum; per location |
-| Continuum removal | `global_baseline` (`'snip'`, `'airpls'`) | [processing.py](src/libs_viewer/libs/processing.py) | via `pybaselines` |
+| Continuum removal | `global_baseline(wl, y, method, **params)`; methods in `BASELINES` (`'snip'`, `'airpls'`), add more with `@register_baseline` | [processing.py](src/libs_viewer/libs/processing.py) | via `pybaselines`. Every function that takes a baseline (`areas_table`, `analyze_sample`, `run_study`, `plot_baseline`) takes `method` + a `baseline_params` dict |
 | Saturation | `saturated_mask`, `exclusion_mask` | [processing.py](src/libs_viewer/libs/processing.py) | Flags clipped pixels across all files of a sample (single shots at full scale; accumulated spectra from ~80% of it, to catch shots that clipped only some of the time) |
 | Total area | `total_area` | [metrics.py](src/libs_viewer/libs/metrics.py) | Optional exclusion of saturated pixels / nm ranges |
 | Line area | `peak_bounds`, `line_window`, `integrate_local_peak` | [metrics.py](src/libs_viewer/libs/metrics.py) | Valley-to-valley (or fixed) window, straight local baseline through the mean of 2 edge pixels each side |
 | Line choice | `select_lines` | [lines.py](src/libs_viewer/libs/lines.py) | NIST candidates filtered by detection, blending, saturation, interferents |
 | Sample tables | `analyze_sample`, `areas_table`, `ratio_tables` | [analysis.py](src/libs_viewer/libs/analysis.py) | Same pixel windows at every temperature; `areas_table` measures any set of spectra (e.g. per location); `R_direct` and `R_rel` tables. R_rel, R_total and the Total scatter use `Total (excl. sat.)` (clipped pixels left out); the plain `Total` is kept for reference. `RatioWarning` when a line window holds saturated pixels, when `Total` is chosen but largely saturated (`saturated_share`), or when a reference area is ≤ 0 (ratios NaN) |
 | Spectrum plot | `plot_spectrum` | [plotting.py](src/libs_viewer/libs/plotting.py) | Log-y, zoom, peak labels, reference lines; returns a matplotlib `Figure` |
-| Line lookups | `strong_lines`, `database_info` | [query.py](src/libs_viewer/nist/query.py) | Read-only; wavelengths returned in nm |
+| Line lookups | `strong_lines`, `lines_near(peaks, tol, elements)`, `elements`, `database_info` | [query.py](src/libs_viewer/nist/query.py) | Read-only; air wavelengths in nm (the Handbook's vacuum values below 200 nm are converted, ~0.06 nm) |
+| Peaks in a spectrum | `detect_peaks(wl, y, min_prominence, exclude)` | [metrics.py](src/libs_viewer/libs/metrics.py) | One row per peak; the same test `select_lines` uses |
 | Line database | `libs-viewer nist build` | [build.py](src/libs_viewer/nist/build.py) | User only. See [NIST line database](#nist-line-database) |
 
 ---
@@ -232,7 +241,7 @@ src/libs_viewer/
     query.py            read-only line lookups, database status
   libs/
     loading.py          LIBSFile (spectra + one row per stored spectrum), LoadLIBSData, overview
-    plan.py             study_plan (manifest / pattern), file-name parsing
+    plan.py             read_manifest, study_plan (manifest / pattern), file-name parsing
     processing.py       per-shot scaling, location spectra, saturation mask, baseline correction
     metrics.py          total area, peak bounds, local-baseline line area
     lines.py            line selection and interferent checks (uses nist.query)
@@ -280,7 +289,7 @@ examples/               notebooks: quick_study, loading_data, end_to_end_temp_st
 
 ### Phase 3: Simple UI (Streamlit)
 Kept deliberately simple; it only calls the library.
-- [ ] Load: pick folder + manifest or pattern, show the resolved plan (`study_plan`)
+- [ ] Load: a `.tdms` file, a folder (optionally recursive) or a CSV / XLSX manifest (`LoadLIBSData`), show `overview()`
 - [ ] Inspect: file parameters, spectrum plot with NIST line overlay
 - [ ] Study: choose elements / lines / baseline, show ratio tables and bar charts, export
 - [ ] Settings (user only): NIST database status, build / rebuild, page cache location and size

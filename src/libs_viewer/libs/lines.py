@@ -5,10 +5,9 @@ Choosing which emission lines to measure, using the NIST Handbook database.
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
 
 from ..nist.query import strong_lines
-from .metrics import peak_bounds
+from .metrics import detect_peaks, peak_bounds
 from .processing import exclusion_mask
 
 
@@ -84,7 +83,7 @@ def select_lines(element: str, wl: np.ndarray, y_refs: dict[str, np.ndarray], n:
 
     excl_wl = wl[exclusion_mask(wl, exclude)]
     peak_wl = {
-        name: wl[find_peaks(y, prominence=min_prominence * np.median(y))[0]]
+        name: detect_peaks(wl, y, min_prominence).wavelength_nm.to_numpy()
         for name, y in y_refs.items()
     }
 

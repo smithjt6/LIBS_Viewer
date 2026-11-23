@@ -19,7 +19,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from scipy.signal import find_peaks
 
 from .analysis import TOTAL, TOTAL_EXCL
-from .processing import global_baseline
+from .processing import baseline_settings, global_baseline
 
 LINE_COLOR = '#1f5fa8'
 LABEL_COLOR = '#444444'
@@ -161,14 +161,15 @@ def plot_spectrum(wavelengths, intensities, log_y: bool = True, n_labels: int = 
     return fig
 
 
-def plot_baseline(wavelengths, intensities, method: str = 'snip', max_half_window: int = 40,
-                  lam: float = 1e6, wl_range=None, log_y: bool = True, title: str | None = None) -> Figure:
+def plot_baseline(wavelengths, intensities, method: str = 'snip', baseline_params: dict | None = None,
+                  wl_range=None, log_y: bool = True, title: str | None = None) -> Figure:
     """
     How well a baseline method follows the continuum: the spectrum with the fitted baseline
     on top, and the baseline-corrected spectrum (what the total area integrates) below.
 
     Args:
-        method, max_half_window, lam: as in `processing.global_baseline` ('snip' or 'airpls').
+        method, baseline_params: the method (a name in `processing.BASELINES`) and its
+            parameters, e.g. {'max_half_window': 60}; left-out ones take their defaults.
         wl_range: (lo, hi) nm zoom window (the baseline is always fitted on the full spectrum).
 
     Returns:
@@ -176,14 +177,15 @@ def plot_baseline(wavelengths, intensities, method: str = 'snip', max_half_windo
     """
     wl = np.asarray(wavelengths, dtype=float)
     y = np.asarray(intensities, dtype=float)
-    corrected, base = global_baseline(wl, y, method, max_half_window, lam)
+    params = baseline_settings(method, baseline_params)
+    corrected, base = global_baseline(wl, y, method, **params)
     lo, hi = (wl.min(), wl.max()) if wl_range is None else sorted(to_nm(x) for x in wl_range)
     view = (wl >= lo) & (wl <= hi)
 
     fig = NotebookFigure(figsize=(14, 6), layout='constrained')
     top, bottom = fig.subplots(2, 1, sharex=True, height_ratios=[2, 1])
     top.plot(wl[view], y[view], color=LINE_COLOR, lw=0.6, label='spectrum')
-    top.plot(wl[view], base[view], color=BASELINE_COLOR, lw=1.4, label=f'{method} baseline')
+    top.plot(wl[view], base[view], color=BASELINE_COLOR, lw=1.4, label=f'{method} baseline ({", ".join(f"{k}={v:g}" for k, v in params.items())})')
     if log_y:
         top.set_yscale('log')
         top.set_ylim(max(y[view].min(), 1e-3) * 0.8, y[view].max() * 1.5)

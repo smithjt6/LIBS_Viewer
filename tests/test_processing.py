@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
 
-from libs_viewer.libs import (LIBSFile, exclusion_mask, global_baseline, location_spectra,
-                              per_shot_columns, per_shot_spectrum, saturated_mask)
+from libs_viewer.libs import (BASELINES, LIBSFile, baseline_settings, exclusion_mask,
+                              global_baseline, location_spectra, register_baseline,
+                              mask_ranges, per_shot_columns, per_shot_spectrum, saturated_mask,
+                              saturated_pixels, saturation_summary)
 from conftest import LINES, WL, continuum, synth_spectrum, write_tdms
 
 
@@ -93,3 +95,87 @@ def test_saturated_mask_partial_clipping_in_accumulated_spectra(tmp_path):
     assert np.flatnonzero(saturated_mask([acc], pad_px=0)).tolist() == [400]
     single = LIBSFile.from_tdms(write_tdms(tmp_path / 'one.tdms', y, accumulate=0))
     assert not saturated_mask([single]).any()          # a single shot at 55000 did not clip
+
+
+def test_saturated_pixels_per_spectrum(tmp_path):
+    '''Location 1 single shot clipped at pixel 400; location 2 accumulated, partly clipped at 500.'''
+    y = synth_spectrum({})
+    y[400], y[500] = 70000.0, 55000.0
+    with pytest.warns(UserWarning, match='settings differ'):
+        f = LIBSFile.from_tdms(write_tdms(tmp_path / 'mix.tdms', y, n_cols=2, accumulates=[0, 1]))
+    sat = saturated_pixels(f)
+    assert sat.shape == f.spectra.shape and sat.index.equals(f.spectra.index)
+    first, second = f.spectra.columns
+    assert np.flatnonzero(sat[first]).tolist() == [400]              # 55000 in one shot: not clipped
+    assert np.flatnonzero(sat[second]).tolist() == [400, 500]
+    # the file-wide mask is the union of the per-spectrum flags
+    np.testing.assert_array_equal(saturated_mask([f], pad_px=0), sat.to_numpy().any(axis=1))
+
+
+def test_saturation_summary(tmp_path):
+    y = synth_spectrum({})
+    y[400] = 70000.0
+    f = LIBSFile.from_tdms(write_tdms(tmp_path / 'sat.tdms', y, n_cols=3))
+    s = saturation_summary(f)
+    assert list(s.columns) == ['location', 'shot', 'shots_summed', 'peak', 'limit',
+                               'saturated_px', 'saturated']
+    assert s.index.equals(f.acquisitions.index)
+    assert s['saturated'].all() and (s['saturated_px'] == 1).all()
+    assert (s['limit'] == 52000.0).all()                          # accumulated spectra
+    np.testing.assert_allclose(s['peak'], 70000.0, rtol=0.02)     # columns scaled 0.99-1.01
+    clean = saturation_summary(LIBSFile.from_tdms(write_tdms(tmp_path / 'ok.tdms', synth_spectrum({}))))
+    assert not clean['saturated'].any() and (clean['saturated_px'] == 0).all()
+
+
+def test_mask_ranges_inverts_exclusion_mask():
+    mask = np.zeros(len(WL), dtype=bool)
+    mask[[0, 1, 2, 100, 799]] = True
+    ranges = mask_ranges(WL, mask)
+    assert ranges == [(WL[0], WL[2]), (WL[100], WL[100]), (WL[799], WL[799])]
+    np.testing.assert_array_equal(exclusion_mask(WL, ranges), mask)
+    assert mask_ranges(WL, np.zeros(len(WL), dtype=bool)) == []
+    with pytest.raises(ValueError):
+        mask_ranges(WL, mask[:10])
+
+
+def test_baseline_settings_fill_defaults_and_reject_unknown():
+    assert baseline_settings('snip') == {'max_half_window': 40}
+    assert baseline_settings('snip', {'max_half_window': 60}) == {'max_half_window': 60}
+    assert baseline_settings('airpls', {}) == {'lam': 1e6}
+    with pytest.raises(ValueError, match=r"takes \['max_half_window'\], not \['lam'\]"):
+        baseline_settings('snip', {'lam': 1e7})            # the other method's parameter
+    with pytest.raises(ValueError, match='must be one of'):
+        baseline_settings('magic')
+
+
+def test_baseline_params_change_the_fit():
+    y = synth_spectrum({'B 400.00': 100.0})
+    _, narrow = global_baseline(WL, y, 'snip', max_half_window=5)
+    _, default = global_baseline(WL, y, 'snip')
+    _, same = global_baseline(WL, y, 'snip', max_half_window=40)
+    np.testing.assert_array_equal(default, same)
+    assert not np.allclose(narrow, default)       # a 5 px window cuts into the 400 nm line
+
+
+def test_register_baseline_makes_a_method_usable_everywhere():
+    from libs_viewer.libs import analyze_sample
+    try:
+        @register_baseline('flat_test', 'A constant level, for this test only.', level=50.0)
+        def _flat(wl, y, level):
+            return np.full(len(y), level)
+
+        corrected, base = global_baseline(WL, np.full(len(WL), 80.0), 'flat_test')
+        np.testing.assert_allclose(base, 50.0)
+        np.testing.assert_allclose(corrected, 30.0)
+        _, base = global_baseline(WL, np.full(len(WL), 80.0), 'flat_test', level=10.0)
+        np.testing.assert_allclose(base, 10.0)
+        assert BASELINES['flat_test'].defaults == {'level': 50.0}
+        y = synth_spectrum({'B 400.00': 100.0})
+        a = analyze_sample(WL, {300: y}, {'B': 400.0}, method='flat_test', baseline_params={'level': 0.0})
+        b = analyze_sample(WL, {300: y}, {'B': 400.0}, method='flat_test', baseline_params={'level': 10.0})
+        assert a.loc['B', 300] == b.loc['B', 300]                  # line areas use their own local baseline
+        assert a.loc['Total', 300] > b.loc['Total', 300]           # the total depends on the baseline
+        with pytest.raises(ValueError, match='already registered'):
+            register_baseline('flat_test', 'again')(_flat)
+    finally:
+        BASELINES.pop('flat_test', None)

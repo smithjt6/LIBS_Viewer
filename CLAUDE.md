@@ -23,13 +23,14 @@ the same library, ICP-MS (Agilent 7000).
 ## Layout
 
 - [src/libs_viewer/libs/](src/libs_viewer/libs/): `loading` (LIBSFile, LoadLIBSData),
-  `plan` (study_plan, temperature_from_name), `processing` (per-shot scaling, baseline, saturation), `metrics` (total / line areas),
+  `plan` (read_manifest, study_plan, temperature_from_name), `processing` (per-shot scaling, baseline registry `BASELINES` / `register_baseline`, saturation), `metrics` (total / line areas),
   `lines` (NIST line selection), `analysis` (analyze_sample, ratio tables), `study` (run_study: the
   whole pipeline in one call, mirrored step by step in examples/end_to_end_temp_study.ipynb),
   `plotting` (returns Figure).
   `libs/__init__` re-exports everything except plotting.
 - [src/libs_viewer/nist/](src/libs_viewer/nist/): `build` (Handbook scraper/parsers, user-only),
-  `query` (read-only lookups; wavelengths stored in Å as published, returned in nm).
+  `query` (read-only lookups; wavelengths stored in Å as published (vacuum below 200 nm),
+  returned as **air** wavelengths in nm, what the spectrometer measures).
 - [src/libs_viewer/core/paths.py](src/libs_viewer/core/paths.py): per-user data folder
   (`%LOCALAPPDATA%\libs_viewer`, override `LIBS_VIEWER_DATA`) holding the NIST DB and page cache.
 - A legacy `nist_handbook.sqlite` / `nist_cache/` may still sit in the repo root (gitignored).

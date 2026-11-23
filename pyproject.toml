@@ -12,6 +12,7 @@ authors = [{ name = "John Smith" }]
 dependencies = [
     "numpy>=2.0",          # np.trapezoid
     "pandas>=2.0",
+    "openpyxl>=3.1",       # .xlsx manifests
     "scipy>=1.11",
     "matplotlib>=3.7",
     "npTDMS>=1.7",
@@ -21,7 +22,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["streamlit>=1.30"]
+ui = [
+    "streamlit>=1.67",     # persist_state, st.error(title=), selectbox filter_mode: what the UI was built on
+    "plotly>=7.0",         # interactive spectra (UI only; the library returns matplotlib figures)
+]
 mcp = ["mcp>=1.0"]
 dev = ["pytest>=7"]
 all = ["libs_viewer[ui,mcp,dev]"]

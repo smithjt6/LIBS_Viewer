@@ -1,9 +1,13 @@
 '''
 Which file is which: map every file of a study to element / sample / temperature.
 
-`study_plan` takes either a manifest (CSV or DataFrame) or a file-name pattern, and raises if
-neither (or both) is given, if a file does not match, or if the mapping is ambiguous. There is
+`study_plan` takes either a manifest (CSV / Excel or DataFrame) or a file-name pattern, and raises
+if neither (or both) is given, if a file does not match, or if the mapping is ambiguous. There is
 no guessing from file names beyond what the pattern states.
+
+`read_manifest` is the one reader of manifest files. It needs only a `file` column, so a manifest
+can also just list and label files for inspection (`LoadLIBSData(manifest=...)`); `study_plan`
+adds the study's own checks on top.
 '''
 
 import re
@@ -30,9 +34,9 @@ def study_plan(folder: str | Path, pattern: str | None = None, manifest=None,
             `{sample}` (optional), and `*` for any text within one folder or file name.
             Example for `Ce/1_wt%/Ce1_300C.tdms`: `'{element}/{sample}/*{temperature}*'`.
             Every .tdms file must match, or this raises.
-        manifest: CSV path or DataFrame with columns file, element, sample, temperature and
-            optionally use_columns (stored-spectrum names such as 'Grid Location # 1-1',
-            separated by ';'; empty = choose automatically).
+        manifest: .csv / .xlsx path or DataFrame (read by `read_manifest`) with columns file,
+            element, sample, temperature and optionally use_columns (stored-spectrum names
+            such as 'Grid Location # 1-1', separated by ';'; empty = choose automatically).
         temperatures: the temperatures used in the study, e.g. [300, 350, 400]. Without it,
             `{temperature}` matches a stand-alone 3-digit number; with it, only these values,
             even when glued to other digits ('Ce1400' -> 400).
@@ -136,6 +140,87 @@ def _plan_from_pattern(folder: Path, pattern: str, temperatures) -> pd.DataFrame
 
 
 # ------------------------------------------------------------------ manifest
+MANIFEST_SUFFIXES = ('.csv', '.xlsx', '.xlsm')
+
+
+def read_manifest(manifest, folder: str | Path | None = None) -> pd.DataFrame:
+    '''
+    Read a manifest: a table with one row per .tdms file and any labels you want to give it.
+
+    Only the `file` column is required: a path relative to `folder`, or an absolute path, so
+    one manifest can gather files from anywhere. Every other column is kept
+    as a label, e.g. element, sample, temperature, operator, notes. Column names are matched
+    without regard to case or surrounding spaces, so 'File' and ' Temperature ' work too.
+    A study needs element, sample and temperature as well; `study_plan` checks those.
+
+    Args:
+        manifest: a .csv / .xlsx / .xlsm path (first sheet), or a DataFrame.
+        folder: the folder the file paths are relative to. Default: the folder holding the
+            manifest. Required when `manifest` is a DataFrame.
+
+    Returns:
+        DataFrame in manifest order: `file` (as a '/'-separated string, as written) followed by
+        the other columns. A `use_columns` column, if present, is parsed into lists of
+        stored-spectrum names (';'-separated; empty = None).
+
+    Raises:
+        ValueError: unsupported file type, no `file` column, a row without a file, a file
+            listed twice, or a listed file that is not a .tdms file.
+        FileNotFoundError: the manifest, the folder, or a listed file does not exist.
+    '''
+    if isinstance(manifest, pd.DataFrame):
+        if folder is None:
+            raise ValueError('folder= is required when the manifest is a DataFrame')
+        df = manifest.copy()
+    else:
+        path = Path(manifest)
+        if not path.is_file():
+            raise FileNotFoundError(f'No such manifest: {path}')
+        suffix = path.suffix.lower()
+        if suffix == '.csv':
+            df = pd.read_csv(path)
+        elif suffix in MANIFEST_SUFFIXES:
+            df = pd.read_excel(path)
+        else:
+            raise ValueError(f'manifest must be one of {MANIFEST_SUFFIXES}, got {path.name!r}')
+        folder = path.parent if folder is None else folder
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(f'No such folder: {folder}')
+
+    # 'File ' -> 'file' for the known columns; user labels keep their spelling
+    known = {c.lower(): c for c in PLAN_COLUMNS}
+    df.columns = [known.get(str(c).strip().lower(), str(c).strip()) for c in df.columns]
+    if 'file' not in df.columns:
+        raise ValueError(f"manifest needs a 'file' column; found {list(df.columns)}")
+    df = df.dropna(how='all').reset_index(drop=True)          # blank rows at the end of a sheet
+    if df.empty:
+        raise ValueError('manifest has no rows')
+
+    blank = df['file'].isna() | (df['file'].astype(str).str.strip() == '')
+    if blank.any():
+        raise ValueError(f'manifest row(s) without a file: {_rows(blank)}')
+    df['file'] = [Path(str(f).strip()).as_posix() for f in df['file']]
+    dup = df['file'].duplicated(keep=False)
+    if dup.any():
+        raise ValueError(f'file(s) listed more than once: {sorted(set(df.loc[dup, "file"]))}')
+    not_tdms = [f for f in df['file'] if Path(f).suffix.lower() != '.tdms']
+    if not_tdms:
+        raise ValueError(f'manifest lists file(s) that are not .tdms: {not_tdms[:10]}')
+    absent = [f for f in df['file'] if not (folder / f).is_file()]
+    if absent:
+        raise FileNotFoundError(f'{len(absent)} manifest file(s) not found under {folder}: {absent[:10]}')
+
+    if 'use_columns' in df.columns:
+        df['use_columns'] = pd.Series([_split_columns(v) for v in df['use_columns']], dtype=object)
+    return df[['file'] + [c for c in df.columns if c != 'file']]
+
+
+def _rows(mask: pd.Series) -> list[int]:
+    '''Row numbers as a spreadsheet shows them (header = row 1).'''
+    return [i + 2 for i in mask[mask].index]
+
+
 def _split_columns(v):
     if v is None or (isinstance(v, float) and np.isnan(v)) or (isinstance(v, str) and not v.strip()):
         return None
@@ -145,15 +230,16 @@ def _split_columns(v):
 
 
 def _plan_from_manifest(folder: Path, manifest) -> pd.DataFrame:
-    df = pd.read_csv(manifest) if isinstance(manifest, (str, Path)) else manifest.copy()
+    df = read_manifest(manifest, folder)
     missing = [c for c in PLAN_COLUMNS[:4] if c not in df.columns]
     if missing:
-        raise ValueError(f'manifest is missing column(s) {missing}; needs {PLAN_COLUMNS[:4]} '
+        raise ValueError(f'a study needs manifest column(s) {missing}; needs {PLAN_COLUMNS[:4]} '
                          '(+ optional use_columns, ";"-separated)')
-    df = df.reindex(columns=PLAN_COLUMNS).astype({'use_columns': object})
-    df['use_columns'] = [_split_columns(v) for v in df['use_columns']]
-    df['file'] = [Path(f).as_posix() for f in df['file']]
-    absent = [f for f in df['file'] if not (folder / f).is_file()]
-    if absent:
-        raise FileNotFoundError(f'manifest file(s) not found under {folder}: {absent[:10]}')
+    for col in PLAN_COLUMNS[1:4]:
+        empty = df[col].isna()
+        if empty.any():
+            raise ValueError(f'{col} missing for file(s): {df.loc[empty, "file"].tolist()[:10]}')
+    df = df.reindex(columns=PLAN_COLUMNS)
+    if df['use_columns'].isna().all():
+        df['use_columns'] = pd.Series([None] * len(df), dtype=object)
     return df

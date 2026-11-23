@@ -89,6 +89,22 @@ def test_plan_from_manifest_csv(study, tmp_path):
                                                  'sample': ['a'], 'temperature': [300]}))
 
 
+def test_plan_from_manifest_xlsx_needs_study_columns(study):
+    xlsx = study / 'manifest.xlsx'
+    files = ['Ce/s1/Ce_s1_300C.tdms', 'Ce/s1/Ce_s1_350C.tdms']
+    pd.DataFrame({'File': files, 'Element': 'Ce', 'Sample': 'one',
+                  'Temperature': [300, 350]}).to_excel(xlsx, index=False)
+    plan = study_plan(study, manifest=xlsx)
+    assert plan.file.tolist() == files and plan.temperature.tolist() == [300, 350]
+    assert plan.use_columns.tolist() == [None, None]
+    # a manifest that is fine for loading but not for a study
+    with pytest.raises(ValueError, match='temperature'):
+        study_plan(study, manifest=pd.DataFrame({'file': files, 'element': 'Ce', 'sample': 'one'}))
+    with pytest.raises(ValueError, match='temperature missing'):
+        study_plan(study, manifest=pd.DataFrame({'file': files, 'element': 'Ce', 'sample': 'one',
+                                                 'temperature': [300, None]}))
+
+
 # ------------------------------------------------------------------ run_study
 def test_run_study_end_to_end(study, nist_db):
     r = run_study(study, elements=['Ce'], pattern=PATTERN, n_lines=3, db_path=nist_db)
@@ -149,6 +165,55 @@ def test_run_study_errors(study, nist_db, tmp_path):
         run_study(study, pattern=PATTERN, db_path=tmp_path / 'none.sqlite')
 
 
+def test_run_study_baseline_params(study, nist_db):
+    default = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False)
+    assert default.settings['baseline_params'] == {'max_half_window': 40}
+    narrow = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False,
+                       baseline_params={'max_half_window': 5})
+    assert narrow.settings['baseline_params'] == {'max_half_window': 5}
+    assert 'snip (max_half_window=5)' in narrow.summary()
+    # the window only changes the totals; line areas use their own local baseline
+    lines = [r for r in default.areas.index if r[1] != TOTAL and 'Total' not in r[1]]
+    pd.testing.assert_frame_equal(default.areas.loc[lines], narrow.areas.loc[lines])
+    assert not np.allclose(default.areas.xs(TOTAL, level='row'), narrow.areas.xs(TOTAL, level='row'))
+    with pytest.raises(ValueError, match=r"not \['lam'\]"):
+        run_study(study, pattern=PATTERN, baseline='snip', baseline_params={'lam': 1e7}, db_path=nist_db)
+
+
+def test_run_study_reports_progress(study, nist_db):
+    calls = []
+    r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db,
+                  progress=lambda done, total, msg: calls.append((done, total, msg)))
+    n_files, n_samples = len(r.plan), r.plan['sample'].nunique()
+    total = n_files + 1 + n_samples + n_files                  # read, Ce lines, measure, scatter
+    assert {t for _, t, _ in calls} == {total}
+    assert [d for d, _, _ in calls] == list(range(total + 1))  # every step once, in order
+    assert calls[-1][2] == 'Done'
+    assert sum(m.startswith('Reading file') for _, _, m in calls) == n_files
+    assert calls[0][2].startswith(f'Reading file 1 of {n_files}')
+    quiet = []
+    run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False,
+              progress=lambda d, t, m: quiet.append(t))
+    assert set(quiet) == {n_files + 1 + n_samples}             # no scatter steps
+
+
+def test_run_study_with_chosen_lines(study, nist_db, tmp_path):
+    r = run_study(study, pattern=PATTERN, db_path=nist_db, scatter=False,
+                  lines={'Ce': [418.6596, 395.2545]})
+    assert r.settings['chosen_lines'] == {'Ce': {'Ce II 418.66': 418.6596, 'Ce II 395.25': 395.2545}}
+    assert all(list(lines) == ['Ce II 418.66', 'Ce II 395.25'] for lines in r.lines.values())
+    assert (r.line_tables['Ce'].status == 'chosen by user').all()
+    assert {('Ce s1', 'Ce II 418.66'), ('Ce s2', 'Ce II 395.25')} <= set(r.r_rel.index)
+    assert 'settings.json' in {p.name for p in r.save(tmp_path / 'out')}
+    named = run_study(study, pattern=PATTERN, db_path=nist_db, scatter=False,
+                      lines={'Ce': {'my line': 399.9237}})
+    assert all(list(lines) == ['my line'] for lines in named.lines.values())
+    with pytest.raises(ValueError, match='not in the study'):
+        run_study(study, pattern=PATTERN, db_path=nist_db, lines={'Gd': [400.0]})
+    with pytest.raises(ValueError, match='outside the measured range'):
+        run_study(study, pattern=PATTERN, db_path=nist_db, lines={'Ce': [500.0]})
+
+
 def test_save_writes_tables_and_settings(study, nist_db, tmp_path):
     r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False)
     written = r.save(tmp_path / 'out')
@@ -179,3 +244,9 @@ def test_cli_analyze(study, nist_db, tmp_path, capsys):
     assert 'R_rel' in capsys.readouterr().out
     assert (out / 'R_rel.csv').is_file()
     assert cli.main(['analyze', str(study), '--pattern', '{element}/*', '--db', str(nist_db)]) == 2
+    out2 = tmp_path / 'cli_out2'
+    assert cli.main(['analyze', str(study), '--pattern', PATTERN, '--lines', '3', '--db', str(nist_db),
+                     '--out', str(out2), '--no-scatter', '--baseline-param', 'max_half_window=60']) == 0
+    assert json.loads((out2 / 'settings.json').read_text())['baseline_params'] == {'max_half_window': 60.0}
+    assert cli.main(['analyze', str(study), '--pattern', PATTERN, '--db', str(nist_db),
+                     '--baseline-param', 'max_half_window']) == 2

@@ -25,22 +25,44 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 
 from .. import __version__
-from ..nist.query import resolve_db
+from ..nist.query import lines_near, resolve_db
 from .analysis import (TOTAL_EXCL, RatioWarning, analyze_sample, areas_table, line_windows,
                        ratio_tables)
 from .lines import select_lines
 from .loading import LayoutWarning, LIBSFile, SettingsWarning, overview_table
 from .plan import study_plan
-from .processing import (BASELINE_METHODS, location_spectra, per_shot_columns, per_shot_spectrum,
+from .processing import (baseline_settings, location_spectra, per_shot_columns, per_shot_spectrum,
                          saturated_mask)
 
 # Settings that must match for two spectra of one sample to be comparable.
 KEY_SETTINGS = ('Gate Delay (usec)', 'Energy')
+
+# progress(done, total, message): called before each step of `run_study`; done counts the
+# steps finished so far, and a last call has done == total.
+Progress = Callable[[int, int, str], None]
+
+
+def _no_progress(message: str) -> None:
+    pass
+
+
+def _counter(progress: Progress | None, total: int) -> Callable[[str], None]:
+    '''A step(message) function that reports to `progress` and counts the steps.'''
+    if progress is None:
+        return _no_progress
+    done = 0
+
+    def step(message: str) -> None:
+        nonlocal done
+        progress(min(done, total), total, message)
+        done += 1
+    return step
 
 
 @dataclass
@@ -71,7 +93,7 @@ class StudyResult:
     Also:
         plan       which file is which, with the stored spectra actually used
         overview   how every file was acquired (spectra used only)
-        line_tables {element: select_lines table}
+        line_tables {element: select_lines table, or the chosen lines (status 'chosen by user')}
         notes      what was dropped, adjusted or could not be measured
         settings   the inputs and versions (provenance); saved as settings.json
         wl, sample_data {sample: Sample}; shortcuts: lines, spectra, masks
@@ -108,7 +130,7 @@ class StudyResult:
         '''Plain-text summary: inputs, picked lines, R_rel table and notes.'''
         s = self.settings
         out = [f"LIBS temperature study: {s['folder']}",
-               f"elements {', '.join(s['elements'])} | baseline {s['baseline']} | "
+               f"elements {', '.join(s['elements'])} | baseline {_baseline_text(s)} | "
                f"reference {s['ref']} C | {len(self.plan)} files, {len(self.samples)} samples", '',
                'Lines:']
         out += [f"  {sample}: {', '.join(lines) or '(none detected)'}" for sample, lines in self.lines.items()]
@@ -146,20 +168,29 @@ class StudyResult:
 
 
 def run_study(folder: str | Path, elements: list[str] | None = None, baseline: str = 'snip',
+              baseline_params: dict | None = None, lines: dict | None = None,
               pattern: str | None = None, manifest=None, temperatures=None, ref: float = 300,
               n_lines: int = 4, min_prominence: float = 0.25, interferents: list[str] | None = None,
               total_row: str = TOTAL_EXCL, scatter: bool = True,
-              db_path: str | Path | None = None) -> StudyResult:
+              db_path: str | Path | None = None, progress: Progress | None = None) -> StudyResult:
     '''
     Runs a complete temperature study on a folder of Applied Spectra .tdms files.
 
     Args:
         folder: the study folder.
         elements: elements to analyse (default: every element in the plan).
-        baseline: continuum removal for the total areas, 'snip' or 'airpls'.
+        baseline: continuum removal for the total areas: a name in `processing.BASELINES`,
+            'snip' (default) or 'airpls', or one added with `register_baseline`.
+        baseline_params: that method's parameters, e.g. {'max_half_window': 60} for SNIP or
+            {'lam': 1e7} for airPLS; left-out ones take their defaults. The full set used is
+            recorded in `settings['baseline_params']`.
         pattern / manifest / temperatures: how files map to element, sample and temperature;
             exactly one of pattern or manifest (see `study_plan`).
         ref: reference temperature; every sample needs a file at it.
+        lines: lines to measure instead of picking them, per element, e.g. from Inspect:
+            {'Ce': [418.66, 399.92]} or {'Ce': {'Ce II 418.66': 418.6596}}. Elements left
+            out are picked automatically. Chosen lines are measured in every sample of the
+            element; a list is labelled from the NIST line within 0.02 nm, if any.
         n_lines: lines to pick per element.
         min_prominence: line detection threshold as a multiple of the spectrum's median
             (0.25 finds weak lines on a high continuum; select_lines' stricter default is 2).
@@ -170,12 +201,15 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
             them, for comparison only (a note is added when they hold much of the light).
         scatter: also compute the location / shot scatter (slower with airpls).
         db_path: NIST database (default: the per-user database).
+        progress: optional progress(done, total, message), called before each step: every
+            file read, every element's line selection, every sample measured and every file's
+            scatter. A last call has done == total. E.g. to drive a progress bar in a UI:
+            `progress=lambda done, total, msg: bar.progress(done / total, text=msg)`.
 
     Returns:
         StudyResult. Raises ValueError / FileNotFoundError for an ambiguous or incomplete study.
     '''
-    if baseline not in BASELINE_METHODS:
-        raise ValueError(f'baseline must be one of {BASELINE_METHODS}, got {baseline!r}')
+    baseline_params = baseline_settings(baseline, baseline_params)   # fail early; full set for provenance
     
     folder = Path(folder)
     db = resolve_db(db_path)                       # fail early if the NIST database is missing
@@ -183,29 +217,46 @@ def run_study(folder: str | Path, elements: list[str] | None = None, baseline: s
                      elements, ref)
     elements = list(dict.fromkeys(plan.element))
     notes: list[str] = []
+    n_files, n_samples = len(plan), plan['sample'].nunique()
+    total = n_files + len(elements) + n_samples + (n_files if scatter else 0)
+    step = _counter(progress, total)
 
-    files, plan['use_columns'] = _load_files(folder, plan, notes)
+    files, plan['use_columns'] = _load_files(folder, plan, notes, step)
     wl = next(iter(files.values())).wavelengths
     if not all(np.array_equal(f.wavelengths, wl) for f in files.values()):
         raise ValueError('files have different wavelength axes; analyse them separately')
 
     samples = _build_samples(plan, files, notes)
-    line_tables = _pick_lines(samples, wl, ref, n_lines, min_prominence, interferents, db, notes)
-    areas, r_direct, r_rel = _measure(samples, wl, baseline, ref, total_row, notes)
-    scatter_df = _scatter(samples, wl, baseline, ref, total_row) if scatter else pd.DataFrame()
+    chosen = _chosen_lines(lines, elements, wl, db)
+    line_tables = _pick_lines(samples, wl, ref, n_lines, min_prominence, interferents, db, notes,
+                              step, chosen)
+    areas, r_direct, r_rel = _measure(samples, wl, baseline, baseline_params, ref, total_row,
+                                      notes, step)
+    scatter_df = (_scatter(samples, wl, baseline, baseline_params, ref, total_row, step) if scatter
+                  else pd.DataFrame())
+    if progress is not None:
+        progress(total, total, 'Done')
 
     settings = {'libs_viewer': __version__, 'created': datetime.now().isoformat(timespec='seconds'),
                 'folder': str(folder.resolve()), 'pattern': pattern,
                 'manifest': str(manifest) if isinstance(manifest, (str, Path)) else
                             ('DataFrame' if manifest is not None else None),
                 'temperatures': list(temperatures) if temperatures else None,
-                'elements': elements, 'baseline': baseline, 'ref': ref, 'n_lines': n_lines,
+                'elements': elements, 'baseline': baseline, 'baseline_params': baseline_params,
+                'chosen_lines': chosen or None, 'ref': ref, 'n_lines': n_lines,
                 'min_prominence': min_prominence, 'interferents': interferents, 'total_row': total_row,
                 'key_settings': list(KEY_SETTINGS), 'nist_db': str(db)}
     
     return StudyResult(settings=settings, plan=plan, overview=overview_table(files),
                        line_tables=line_tables, areas=areas, r_direct=r_direct, r_rel=r_rel,
                        scatter=scatter_df, notes=notes, wl=wl, sample_data=samples)
+
+
+def _baseline_text(settings: dict) -> str:
+    '''e.g. "snip (max_half_window=40)".'''
+    params = settings.get('baseline_params') or {}
+    return settings['baseline'] + (f" ({', '.join(f'{k}={v:g}' for k, v in params.items())})"
+                                   if params else '')
 
 
 # ------------------------------------------------------------------ 1. plan
@@ -233,7 +284,8 @@ def _fmt(setting: tuple) -> str:
     return ', '.join(f'{k} {v:g}' for k, v in setting)
 
 
-def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dict[str, LIBSFile], list]:
+def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str],
+                step=_no_progress) -> tuple[dict[str, LIBSFile], list]:
     '''
     Reads every file of the plan, restricted to the spectra to use: the manifest's
     use_columns if given, otherwise those acquired with the sample's usual setting (the
@@ -244,7 +296,8 @@ def _load_files(folder: Path, plan: pd.DataFrame, notes: list[str]) -> tuple[dic
     '''
     raw = {}
 
-    for k in plan.file:
+    for i, k in enumerate(plan.file, 1):
+        step(f'Reading file {i} of {len(plan)}: {k}')
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             raw[k] = LIBSFile.from_tdms(folder / k)
@@ -308,13 +361,51 @@ def _build_samples(plan: pd.DataFrame, files: dict[str, LIBSFile], notes: list[s
 
 
 # ------------------------------------------------------------------ 4. lines
+def _chosen_lines(lines: dict | None, elements: list[str], wl, db) -> dict[str, dict[str, float]]:
+    '''`run_study(lines=...)` as {element: {label: nm}}, checked against the study.'''
+    out = {}
+    for el, given in (lines or {}).items():
+        if el not in elements:
+            raise ValueError(f'lines given for {el}, which is not in the study {elements}')
+        if isinstance(given, dict):
+            chosen = {str(label): float(nm) for label, nm in given.items()}
+        else:
+            nms = [float(nm) for nm in given]
+            near = lines_near(nms, tol=0.02, elements=[el], db_path=db).drop_duplicates('peak_nm')
+            names = dict(zip(near.peak_nm, near.species))
+            chosen = {f'{names.get(nm, el)} {nm:.2f}': nm for nm in nms}
+        if not chosen:
+            raise ValueError(f'no lines given for {el}')
+        outside = [nm for nm in chosen.values() if not wl.min() <= nm <= wl.max()]
+        if outside:
+            raise ValueError(f'{el} line(s) {outside} are outside the measured range '
+                             f'{wl.min():.1f}-{wl.max():.1f} nm')
+        out[el] = chosen
+    return out
+
+
 def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, interferents, db,
-                notes: list[str]) -> dict[str, pd.DataFrame]:
-    '''select_lines per element; each sample keeps the picked lines detected in it.'''
+                notes: list[str], step=_no_progress,
+                chosen: dict[str, dict[str, float]] | None = None) -> dict[str, pd.DataFrame]:
+    '''
+    select_lines per element; each sample keeps the picked lines detected in it. Elements in
+    `chosen` skip the selection: every sample gets exactly those lines.
+    '''
     elements = list(dict.fromkeys(s.element for s in samples.values()))
     tables = {}
     for el in elements:
         group = [s for s in samples.values() if s.element == el]
+        if chosen and el in chosen:
+            step(f'Using the chosen {el} lines')
+            tables[el] = pd.DataFrame({
+                'species': [label.rsplit(' ', 1)[0] for label in chosen[el]],
+                'intensity': np.nan, 'wavelength_nm': list(chosen[el].values()),
+                'status': 'chosen by user', 'n_detected': np.nan,
+                'detected_in': [[] for _ in chosen[el]], 'label': list(chosen[el])})
+            for s in group:
+                s.lines = dict(chosen[el])
+            continue
+        step(f'Choosing {el} lines from the NIST database')
         others = [e for e in dict.fromkeys(elements + list(interferents or [])) if e != el]
         table = select_lines(el, wl, {s.name: s.spectra[ref] for s in group}, n=n_lines,
                              interferents=others or None,
@@ -333,17 +424,19 @@ def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, in
 
 
 # ------------------------------------------------------------------ 5. areas and ratios
-def _measure(samples: dict[str, Sample], wl, baseline, ref, total_row,
-             notes: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _measure(samples: dict[str, Sample], wl, baseline, baseline_params, ref, total_row,
+             notes: list[str], step=_no_progress) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     '''analyze_sample + ratio_tables per sample; ratio warnings go into `notes`.'''
     areas: dict[str, pd.DataFrame] = {}
     r_direct: dict[str, pd.DataFrame] = {}
     r_rel: dict[str, pd.DataFrame] = {}
 
     for s in samples.values():
+        step(f'Measuring line and total areas: {s.name}')
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always', RatioWarning)
-            a = analyze_sample(wl, s.spectra, s.lines, method=baseline, exclude=s.mask, ref=ref)
+            a = analyze_sample(wl, s.spectra, s.lines, method=baseline,
+                               baseline_params=baseline_params, exclude=s.mask, ref=ref)
             r = ratio_tables(a, ref=ref, total_row=total_row)
         s.areas = a
 
@@ -368,7 +461,8 @@ def _cv(table: pd.DataFrame) -> pd.Series:
     return 100 * table.std(axis=1) / table.mean(axis=1)
 
 
-def _scatter(samples: dict[str, Sample], wl, baseline, ref, total_row=TOTAL_EXCL) -> pd.DataFrame:
+def _scatter(samples: dict[str, Sample], wl, baseline, baseline_params, ref,
+             total_row=TOTAL_EXCL, step=_no_progress) -> pd.DataFrame:
     '''
     Per (sample, temperature):
         location CV   spread of the per-location mean spectra (2+ locations)
@@ -384,11 +478,13 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref, total_row=TOTAL_EXCL
         windows = s.windows if s.windows is not None else line_windows(wl, s.spectra[ref], s.lines)
 
         for t, f in s.files.items():
+            step(f'Location / shot scatter: {s.name} at {t:g} C')
             row = {}
 
             locs = location_spectra(f)
             if locs.shape[1] > 1:
-                cv = _cv(areas_table(wl, locs, s.lines, windows, method=baseline, exclude=s.mask))
+                cv = _cv(areas_table(wl, locs, s.lines, windows, method=baseline,
+                                     baseline_params=baseline_params, exclude=s.mask))
                 row['location CV, lines (%)'] = cv[lines].mean() if lines else np.nan
                 row['location CV, Total (%)'] = cv[total_row]
 
@@ -396,7 +492,8 @@ def _scatter(samples: dict[str, Sample], wl, baseline, ref, total_row=TOTAL_EXCL
             per_loc = single.groupby('location').size()
             if (per_loc > 1).any():
                 shots = per_shot_columns(f)[single.index]
-                a = areas_table(wl, shots, s.lines, windows, method=baseline, exclude=s.mask)
+                a = areas_table(wl, shots, s.lines, windows, method=baseline,
+                                baseline_params=baseline_params, exclude=s.mask)
                 g = a.T.groupby(single['location'])
                 cv = (100 * g.std() / g.mean())[per_loc > 1].mean()
                 row['shot CV, lines (%)'] = cv[lines].mean() if lines else np.nan
