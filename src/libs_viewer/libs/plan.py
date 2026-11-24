@@ -66,6 +66,40 @@ def study_plan(folder: str | Path, pattern: str | None = None, manifest=None,
     return plan.sort_values(['element', 'sample', 'temperature'], kind='stable').reset_index(drop=True)
 
 
+def guess_labels(files, pattern: str, temperatures=None) -> pd.DataFrame:
+    '''
+    Fills element / sample / temperature from file names, to pre-fill a draft manifest for the
+    user to check. Same `pattern` syntax as `study_plan`, but lenient: a file that does not
+    match gets empty labels instead of raising. It is a suggestion; `study_plan` still validates
+    whatever the manifest finally says.
+
+    Args:
+        files: file keys (paths relative to the data folder, '/'-separated).
+        pattern: e.g. '{element}/{sample}/*{temperature}*'.
+        temperatures: as in `study_plan`.
+
+    Returns:
+        DataFrame indexed by file with columns element, sample, temperature (None where unmatched).
+    '''
+    if pattern.lower().endswith('.tdms'):
+        pattern = pattern[:-5]
+    regex = _pattern_regex(pattern, temperatures)
+    rows = {}
+    for rel in files:
+        stem = rel[:-5] if rel.lower().endswith('.tdms') else rel
+        m = regex.fullmatch(stem)
+        if not m:
+            rows[rel] = (None, None, None)
+            continue
+        t = float(m['temperature'])
+        sample = m.groupdict().get('sample')
+        rows[rel] = (m['element'], f"{m['element']} {sample}" if sample else m['element'],
+                     int(t) if t.is_integer() else t)
+    out = pd.DataFrame.from_dict(rows, orient='index', columns=['element', 'sample', 'temperature'])
+    out.index.name = 'file'
+    return out
+
+
 def temperature_from_name(name: str) -> int:
     '''Parses the temperature from names like 'Ce_Sample2_Temp_300C.tdms' or 'Gd_Sample5_300_3.5delay.tdms'.'''
     m = re.search(r'_(\d{3})C?(?=[_.])', Path(name).name)
