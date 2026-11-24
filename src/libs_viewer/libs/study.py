@@ -19,8 +19,11 @@ Everything it decided is recorded in `StudyResult.settings` and `StudyResult.not
 `save()` writes both next to the tables. No plotting here (see plotting.plot_study).
 '''
 
+import io
 import json
+import tempfile
 import warnings
+import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,6 +38,7 @@ from ..nist.query import lines_near, resolve_db
 from .analysis import (TOTAL_EXCL, RatioWarning, analyze_sample, areas_table, line_windows,
                        ratio_tables)
 from .lines import select_lines
+from .metrics import EDGE_PTS, line_window
 from .loading import LayoutWarning, LIBSFile, SettingsWarning, overview_table
 from .plan import study_plan
 from .processing import (baseline_settings, location_spectra, per_shot_columns, per_shot_spectrum,
@@ -74,6 +78,7 @@ class Sample:
     spectra: dict[float, np.ndarray]      # {temperature: mean per-shot spectrum}
     mask: np.ndarray                      # saturated pixels at any temperature
     lines: dict[str, float] = field(default_factory=dict)   # {label: nm}
+    skipped_lines: list[str] = field(default_factory=list)  # chosen lines this sample could not apply
     areas: pd.DataFrame | None = None
     windows: dict[str, tuple[int, int]] | None = None   # {label: (lo, hi)}
 
@@ -117,6 +122,11 @@ class StudyResult:
     @property
     def lines(self) -> dict[str, dict[str, float]]:
         return {s: d.lines for s, d in self.sample_data.items()}
+
+    @property
+    def skipped_lines(self) -> dict[str, list[str]]:
+        '''{sample: chosen lines it could not apply (no clear peak)}; only samples with any.'''
+        return {s: d.skipped_lines for s, d in self.sample_data.items() if d.skipped_lines}
 
     @property
     def spectra(self) -> dict[str, dict[float, np.ndarray]]:
@@ -165,6 +175,20 @@ class StudyResult:
         (out / 'settings.json').write_text(json.dumps(meta, indent=2, default=str), encoding='utf-8')
         (out / 'summary.txt').write_text(self.summary() + '\n', encoding='utf-8')
         return written + [out / 'settings.json', out / 'summary.txt']
+
+    def to_zip(self) -> bytes:
+        '''
+        Everything `save()` writes, as one zip (bytes, e.g. for a download button). It includes
+        `plan.csv`, which doubles as the study's manifest: put it in the data folder and load it
+        with `manifest=` to repeat the study without labelling the files again.
+        '''
+        with tempfile.TemporaryDirectory() as tmp:
+            names = self.save(tmp)
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as z:
+                for p in names:
+                    z.write(p, p.name)
+        return buffer.getvalue()
 
 
 def run_study(folder: str | Path, elements: list[str] | None = None, baseline: str = 'snip',
@@ -384,6 +408,35 @@ def _chosen_lines(lines: dict | None, elements: list[str], wl, db) -> dict[str, 
     return out
 
 
+def _measurable(sample: Sample, wl, ref, lines: dict[str, float],
+                notes: list[str]) -> tuple[dict[str, float], list[str]]:
+    '''
+    Splits the chosen `lines` into those with a usable window in the sample's reference
+    spectrum and the labels of those without. A line the sample does not show (no clear peak
+    near it, so the window collapses to a few noisy pixels) is left out with a note instead of
+    failing the study, as the automatic selection does.
+
+    Returns:
+        ({label: nm} to measure, [labels left out]).
+    '''
+    min_px = max(3, 2 * EDGE_PTS + 1)
+    keep, skipped = {}, []
+    for label, nm in lines.items():
+        try:
+            line_window(wl, sample.spectra[ref], nm, min_px=min_px)
+        except ValueError:
+            skipped.append(label)
+        else:
+            keep[label] = nm
+    if skipped:
+        notes.append(f'{sample.name}: not all chosen lines were applied; no clear peak at {ref} C '
+                     f'for: {", ".join(skipped)}')
+    if not keep:
+        notes.append(f'{sample.name}: none of the chosen lines could be applied; '
+                     'only totals are reported')
+    return keep, skipped
+
+
 def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, interferents, db,
                 notes: list[str], step=_no_progress,
                 chosen: dict[str, dict[str, float]] | None = None) -> dict[str, pd.DataFrame]:
@@ -403,7 +456,7 @@ def _pick_lines(samples: dict[str, Sample], wl, ref, n_lines, min_prominence, in
                 'status': 'chosen by user', 'n_detected': np.nan,
                 'detected_in': [[] for _ in chosen[el]], 'label': list(chosen[el])})
             for s in group:
-                s.lines = dict(chosen[el])
+                s.lines, s.skipped_lines = _measurable(s, wl, ref, chosen[el], notes)
             continue
         step(f'Choosing {el} lines from the NIST database')
         others = [e for e in dict.fromkeys(elements + list(interferents or [])) if e != el]

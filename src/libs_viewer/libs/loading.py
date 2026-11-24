@@ -572,6 +572,7 @@ class LoadLIBSData(Mapping[str, LIBSFile]):
         self.path = None if path is None else Path(path)
         self.recursive = recursive
         self.manifest = manifest
+        self.root: Path | None = None     # the folder the keys are relative to (set on loading)
         self.labels: pd.DataFrame | None = None
         self.data: dict[str, LIBSFile] = {}
         if manifest is not None:
@@ -596,6 +597,7 @@ class LoadLIBSData(Mapping[str, LIBSFile]):
         else:
             raise FileNotFoundError(f"No such file or folder: {self.path}")
 
+        self.root = root
         for f in files:
             try:
                 self.data[f.relative_to(root).as_posix()] = LIBSFile.from_tdms(f)
@@ -606,6 +608,7 @@ class LoadLIBSData(Mapping[str, LIBSFile]):
         '''Read exactly the files the manifest lists; any that can't be read is an error.'''
         table = read_manifest(self.manifest, self.path)
         root = self.path if self.path is not None else Path(self.manifest).parent
+        self.root = root
         failed = []
         for key in table['file']:
             try:

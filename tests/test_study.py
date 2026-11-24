@@ -236,6 +236,34 @@ def test_plots(study, nist_db):
     assert len(fig.axes) == 2
 
 
+def test_chosen_line_the_sample_does_not_show_is_dropped_with_a_note(study, nist_db):
+    from types import SimpleNamespace
+    from libs_viewer.libs.study import _measurable
+    zigzag = 100.0 + 5.0 * (np.arange(len(WL)) % 2)          # no line: every window is 3 pixels
+    near_line = np.abs(WL - 418.6596) < 0.3                  # one real line, in a spectrum otherwise empty
+    sample = SimpleNamespace(name='Ce s1', spectra={300: np.where(near_line, ce_spectrum(1), zigzag)})
+    notes = []
+    kept, skipped = _measurable(sample, WL, 300,
+                                {'Ce II 418.66': 418.6596, 'Ce II 405.00': 405.0}, notes)
+    assert list(kept) == ['Ce II 418.66'] and skipped == ['Ce II 405.00']
+    assert len(notes) == 1 and 'not all chosen lines were applied' in notes[0] and 'Ce II 405.00' in notes[0]
+    notes = []
+    assert _measurable(sample, WL, 300, {'Ce II 405.00': 405.0}, notes) == ({}, ['Ce II 405.00'])
+    assert 'only totals are reported' in notes[-1]
+
+
+def test_plots_as_the_study_page_calls_them(study, nist_db):
+    from libs_viewer.libs.plotting import plot_spectrum
+    r = run_study(study, pattern=PATTERN, n_lines=3, db_path=nist_db, scatter=False)
+    spectrum = r.spectra['Ce s1'][350]
+    fig = plot_baseline(r.wl, spectrum, method=r.settings['baseline'],
+                        baseline_params=r.settings['baseline_params'], title='Ce s1, 350 C')
+    assert len(fig.axes) == 2
+    fig = plot_spectrum(r.wl, spectrum, ref_lines=r.lines['Ce s1'], wl_range=(394, 420))
+    assert len(fig.axes) == 1
+    assert len(plot_study(r, log_y=False).axes) == 2
+
+
 def test_cli_analyze(study, nist_db, tmp_path, capsys):
     out = tmp_path / 'cli_out'
     code = cli.main(['analyze', str(study), '--pattern', PATTERN, '--lines', '3',
